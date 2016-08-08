@@ -12,7 +12,9 @@ LIB_NAME = libchapeau.a
 
 OBJS = Database.o \
 DBDate.o \
-DBStatementArgs.o
+DBStatementArgs.o \
+SQLiteDatabase.o \
+SQLiteResultSet.o
 
 all : $(LIB_NAME)
 
