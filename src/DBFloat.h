@@ -1,6 +1,8 @@
 #ifndef CHAPEAU_FLOAT_H
 #define CHAPEAU_FLOAT_H
 
+#include <stdio.h>
+
 #include "DBAbstractDataType.h"
 #include "Database.h"
 

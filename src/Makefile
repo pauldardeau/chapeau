@@ -1,10 +1,10 @@
 # Copyright Paul Dardeau, SwampBits LLC 2014
 # BSD License
 
-CC = clang
-CXX = clang++
+CC = gcc
+CXX = g++
 CC_OPTS = -c -Wall -O2
-CXX_OPTS = -c -Wall -O2 -std=c++11 -I../../chaudiere/src
+CXX_OPTS = -c -Wall -O2 -I../../chaudiere/src
 ARCHIVE_CMD = ar
 ARCHIVE_OPTS = rs
 

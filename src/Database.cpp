@@ -11,6 +11,7 @@
 #include "DBDate.h"
 #include "DBData.h"
 
+using namespace std;
 
 //******************************************************************************
 
@@ -159,12 +160,12 @@ void Database::setShouldCacheStatements(bool value) {
 //******************************************************************************
 
 DBStatement* Database::cachedStatementForQuery(const std::string& query) {
-   auto it = m_cachedStatements.find(query);
+   map<string,DBStatement*>::iterator it = m_cachedStatements.find(query);
    if (it != m_cachedStatements.end()) {
       return (*it).second;
    }
    
-   return nullptr;
+   return NULL;
 }
 
 //******************************************************************************
@@ -178,8 +179,8 @@ void Database::setCachedStatement(DBStatement* statement,
 //******************************************************************************
 
 void Database::clearCachedStatements() {
-   auto it = m_cachedStatements.begin();
-   const auto itEnd = m_cachedStatements.end();
+   map<string,DBStatement*>::iterator it = m_cachedStatements.begin();
+   map<string,DBStatement*>::const_iterator itEnd = m_cachedStatements.end();
    
    for (; it != itEnd; ++it) {
       // close the statements

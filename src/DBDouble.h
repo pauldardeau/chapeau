@@ -1,6 +1,8 @@
 #ifndef CHAPEAU_DOUBLE_H
 #define CHAPEAU_DOUBLE_H
 
+#include <stdio.h>
+
 #include "DBAbstractDataType.h"
 #include "Database.h"
 

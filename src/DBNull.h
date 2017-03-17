@@ -16,7 +16,7 @@ public:
    ~DBNull() {}
    
    void* value() const {
-      return nullptr;
+      return NULL;
    }
    
    std::string valueAsString() const {

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <unistd.h>
 
 #include "SQLiteResultSet.h"
@@ -221,7 +222,7 @@ std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
       (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
    
    if (!c) {
-      return nullptr;
+      return NULL;
    }
    
    return new std::string(c);
@@ -238,7 +239,7 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return nullptr;
+      return NULL;
    }
    
    return stringForColumnIndex(columnIdx);
@@ -255,7 +256,7 @@ DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return nullptr;
+      return NULL;
    }
 
    return dateForColumnIndex(columnIdx);
@@ -278,7 +279,7 @@ DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return nullptr;
+      return NULL;
    }
    
    return dataForColumnIndex(columnIdx);
