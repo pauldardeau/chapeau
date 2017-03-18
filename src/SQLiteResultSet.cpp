@@ -10,6 +10,7 @@
 
 
 using namespace chaudiere;
+using namespace chapeau;
 
 //******************************************************************************
 

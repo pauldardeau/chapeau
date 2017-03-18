@@ -4,9 +4,11 @@
 #include <string>
 #include <memory>
 
+
+namespace chapeau {
+
 class Database;
 class DBStatement;
-
 
 /**
  *
@@ -82,6 +84,8 @@ private:
    std::string m_typeName;
 
 };
+
+}
 
 #endif
 

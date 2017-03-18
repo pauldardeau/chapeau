@@ -7,6 +7,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 class DBString : public DBAbstractDataType {
    
 public:
@@ -53,6 +55,8 @@ private:
    std::string m_value;
 
 };
+
+}
 
 #endif
 

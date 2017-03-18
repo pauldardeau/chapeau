@@ -12,6 +12,7 @@
 #include "DBData.h"
 
 using namespace std;
+using namespace chapeau;
 
 //******************************************************************************
 

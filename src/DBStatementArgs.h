@@ -4,6 +4,8 @@
 #include <vector>
 
 
+namespace chapeau {
+
 class DBAbstractDataType;
 
 
@@ -67,6 +69,8 @@ private:
    DBStatementArgs& operator=(const DBStatementArgs&);
    
 };
+
+}
 
 #endif
 

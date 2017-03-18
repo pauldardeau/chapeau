@@ -8,6 +8,7 @@
 #include "sqlite3.h"
 #include "Database.h"
 
+namespace chapeau {
 
 class SQLiteStatement;
 class SQLiteResultSet;
@@ -146,6 +147,7 @@ private:
 
 };
 
+}
 
 #endif
 

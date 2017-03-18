@@ -7,6 +7,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 class DBFloat : public DBAbstractDataType {
    
 public:
@@ -55,6 +57,8 @@ private:
    float m_value;
 
 };
+
+}
 
 #endif
 

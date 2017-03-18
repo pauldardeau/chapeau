@@ -4,6 +4,8 @@
 #include "DBAbstractDataType.h"
 #include "Database.h"
 
+namespace chapeau {
+
 class DBBool : public DBAbstractDataType {
    
 public:
@@ -57,6 +59,8 @@ public:
 private:
    bool m_value;
 };
+
+}
 
 #endif
 

@@ -2,6 +2,7 @@
 #include <time.h>
 #include "DBDate.h"
 
+using namespace chapeau;
 
 static const std::string DB_DATE_TYPE_NAME = "Date";
 

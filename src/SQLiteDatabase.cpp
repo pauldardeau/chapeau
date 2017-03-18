@@ -21,6 +21,7 @@
 
 
 using namespace chaudiere;
+using namespace chapeau;
 
 class MarkInUse {
 public:

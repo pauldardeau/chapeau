@@ -6,6 +6,9 @@
 #include "DBAbstractDataType.h"
 #include "Database.h"
 
+
+namespace chapeau {
+
 class DBDouble : public DBAbstractDataType {
 
 public:
@@ -54,6 +57,8 @@ private:
    double m_value;
 
 };
+
+}
 
 #endif
 

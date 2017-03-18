@@ -5,6 +5,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 class DBNull : public DBAbstractDataType {
    
 public:
@@ -39,6 +41,8 @@ private:
    std::string m_correspondingType;
 
 };
+
+}
 
 #endif
 

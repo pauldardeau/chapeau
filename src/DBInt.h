@@ -7,6 +7,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 class DBInt : public DBAbstractDataType {
    
 public:
@@ -55,6 +57,8 @@ private:
    int m_value;
 
 };
+
+}
 
 #endif
 

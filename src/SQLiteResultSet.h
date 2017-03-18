@@ -8,6 +8,8 @@
 #include "sqlite3.h"
 
 
+namespace chapeau {
+
 class SQLiteDatabase;
 class SQLiteStatement;
 class Data;
@@ -195,6 +197,8 @@ private:
    SQLiteResultSet& operator=(const SQLiteResultSet&);
 
 };
+
+}
 
 #endif
 

@@ -6,6 +6,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 /**
  *
  */
@@ -101,6 +103,8 @@ private:
    chaudiere::DateTime m_dateTime;
 
 };
+
+}
 
 #endif
 

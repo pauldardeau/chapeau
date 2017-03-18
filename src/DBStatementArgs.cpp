@@ -1,6 +1,8 @@
 #include "DBStatementArgs.h"
 #include "DBAbstractDataType.h"
 
+using namespace chapeau;
+
 //******************************************************************************
 
 DBStatementArgs::DBStatementArgs() {

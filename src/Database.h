@@ -6,6 +6,8 @@
 #include <map>
 #include <memory>
 
+namespace chapeau {
+
 class DBNull;
 class DBBool;
 class DBInt;
@@ -526,6 +528,8 @@ public:
     */
    virtual void close() = 0;
 };
+
+}
 
 #endif
 

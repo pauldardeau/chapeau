@@ -8,6 +8,8 @@
 #include "Database.h"
 
 
+namespace chapeau {
+
 class DBData : public DBAbstractDataType {
 
 public:
@@ -71,6 +73,8 @@ private:
    std::vector<char> m_buffer;
    unsigned long m_length;
 };
+
+}
 
 #endif
 
