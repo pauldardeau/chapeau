@@ -3,12 +3,12 @@
 
 CC = gcc
 CXX = g++
-CC_OPTS = -c -Wall -O2
-CXX_OPTS = -c -Wall -O2 -I../../chaudiere/src
+CC_OPTS = -c -shared -fPIC -Wall -O2
+CXX_OPTS = -c -Wall -shared -fPIC -O2 -I../../chaudiere/src
 ARCHIVE_CMD = ar
 ARCHIVE_OPTS = rs
 
-LIB_NAME = libchapeau.a
+LIB_NAME = chapeau.so
 
 OBJS = Database.o \
 DBDate.o \
@@ -23,7 +23,7 @@ clean :
 	rm -f $(LIB_NAME)
 	
 $(LIB_NAME) : $(OBJS)
-	$(ARCHIVE_CMD) $(ARCHIVE_OPTS) $(LIB_NAME) $(OBJS)
+	$(CXX) -shared -fPIC $(OBJS) -o $(LIB_NAME)
 
 %.o : %.cpp
 	$(CXX) $(CXX_OPTS) $< -o $@
