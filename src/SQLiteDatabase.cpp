@@ -570,7 +570,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 bool SQLiteDatabase::executeUpdate(const std::string& sql) {
    if (NULL == m_db) {
       ::printf("error: no database connection\n");
-      return NULL;
+      return false;
    }
 
    if (m_inUse) {
@@ -718,7 +718,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    const DBStatementArgs& args) {
    if (NULL == m_db) {
       ::printf("error: no database connection\n");
-      return NULL;
+      return false;
    }
 
    if (m_inUse) {
