@@ -518,7 +518,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
       } while (retry);
    }
    
-   const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
+   const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
    const size_t argCount = args.size();
    
    if (!statement) {
@@ -529,8 +529,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
       }
    }
 
-   int idx = 0;
-   bool bindRC;
+   size_t idx = 0;
 
    for (; idx < argCount; ++idx) {
       const DBAbstractDataType* arg = args[idx];
@@ -542,13 +541,13 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                      arg->typeName().c_str());
          }
 
-         bindRC = arg->bind(this, idx+1, statement);
+         arg->bind(this, idx+1, statement);
       } else {
          if (m_traceExecution) {
             ::printf("obj: <null>\n");
          }
 
-         bindRC = bindNull(idx+1, statement);
+         bindNull(idx+1, statement);
       }
    }
    
@@ -782,7 +781,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       } while (retry);
    }
    
-   const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
+   const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
    const size_t argsCount = args.size();
    
    if (!cachedStmt) {
@@ -793,8 +792,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       }
    }
 
-   bool bindRC;
-   int idx = 0;
+   size_t idx = 0;
    
    for (; idx < argsCount; ++idx) {
       const DBAbstractDataType* arg = args[idx];
@@ -806,13 +804,13 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
                      arg->typeName().c_str());
          }
 
-         bindRC = arg->bind(this, idx+1, cachedStmt);
+         arg->bind(this, idx+1, cachedStmt);
       } else {
          if (m_traceExecution) {
             ::printf("obj: <null>\n");
          }
 
-         bindRC = bindNull(idx+1, cachedStmt);
+         bindNull(idx+1, cachedStmt);
       }
    }
    
