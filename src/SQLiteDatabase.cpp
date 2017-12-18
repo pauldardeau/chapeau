@@ -390,7 +390,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
    if (!pStmt) {
       do {
          retry = false;
-         rc = ::sqlite3_prepare(m_db, sql.c_str(), -1, &pStmt, 0);
+         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
          
          if (SQLITE_BUSY == rc) {
             retry = true;
@@ -417,7 +417,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
                if (m_crashOnErrors) {
                }
             }
-            
+
             return NULL;
          }
       } while (retry);
