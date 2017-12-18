@@ -32,8 +32,12 @@ SQLiteResultSet::~SQLiteResultSet() {
 //******************************************************************************
 
 void SQLiteResultSet::close() {
-   m_statement->reset();
-   m_parentDB->setInUse(false);
+   if (m_statement != NULL) {
+      m_statement->reset();
+   }
+   if (m_parentDB != NULL) {
+      m_parentDB->setInUse(false);
+   }
 }
 
 //******************************************************************************
@@ -66,9 +70,9 @@ bool SQLiteResultSet::next() {
    
    do {
       retry = false;
-      
+
       rc = sqlite3_step(m_statement->statement());
-      
+
       if (SQLITE_BUSY == rc) {
          // this will happen if the db is locked, like if we are doing an update or insert.
          // in that case, retry the step... and maybe wait just 10 milliseconds.
