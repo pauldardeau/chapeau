@@ -16,6 +16,12 @@ using namespace chapeau;
 
 //******************************************************************************
 
+Database::Database() :
+   m_shouldCacheStatements(true) {
+}
+
+//******************************************************************************
+
 bool Database::bind(const DBNull* nullWrapper,
                     int idx,
                     DBStatement* statement) {

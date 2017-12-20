@@ -29,6 +29,11 @@ class Database {
 
 public:
    /**
+    * Constructor
+    */
+   Database();
+
+   /**
     * Destructor
     */
    virtual ~Database() {}
