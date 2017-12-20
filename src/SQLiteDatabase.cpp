@@ -135,7 +135,7 @@ bool SQLiteDatabase::goodConnection() {
    DBResultSet* rs =
       executeQuery("select name from sqlite_master where type='table'");
    
-   if (rs) {
+   if (rs != NULL) {
       rs->close();
       return true;
    }
