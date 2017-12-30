@@ -8,7 +8,7 @@ CXX_OPTS = -c -Wall -fPIC -O2 -I/usr/local/include -I../../chaudiere/src
 ARCHIVE_CMD = ar
 ARCHIVE_OPTS = rs
 
-LIB_NAME = chapeau.so
+LIB_NAME = libchapeau.so
 
 OBJS = Database.o \
 DBDate.o \
