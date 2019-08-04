@@ -369,7 +369,8 @@ public:
    virtual bool goodConnection() = 0;
 
 private:
-   std::map<std::string, DBStatement*> m_cachedStatements;
+   typedef std::map<std::string, DBStatement*> CachedStatementMap;
+   CachedStatementMap m_cachedStatements;
    bool m_shouldCacheStatements;
 
 };

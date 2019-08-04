@@ -172,7 +172,7 @@ DBStatement* Database::cachedStatementForQuery(const std::string& query) {
       return (*it).second;
    }
    
-   return NULL;
+   return nullptr;
 }
 
 //******************************************************************************
@@ -186,14 +186,9 @@ void Database::setCachedStatement(DBStatement* statement,
 //******************************************************************************
 
 void Database::clearCachedStatements() {
-   map<string,DBStatement*>::iterator it = m_cachedStatements.begin();
-   map<string,DBStatement*>::const_iterator itEnd = m_cachedStatements.end();
-   
-   for (; it != itEnd; ++it) {
-      // close the statements
-      DBStatement* statement = (*it).second;
-      statement->close();
-   }
+   std::for_each(begin(m_cachedStatements),
+                 end(m_cachedStatements),
+                 [](CachedStatementMap::value_type& n) { n.second->close(); });
    
    m_cachedStatements.erase(m_cachedStatements.begin(),
                             m_cachedStatements.end());
