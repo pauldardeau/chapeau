@@ -18,14 +18,14 @@ public:
    ~DBNull() {}
    
    void* value() const {
-      return NULL;
+      return nullptr;
    }
    
-   std::string valueAsString() const {
+   std::string valueAsString() const override {
       return std::string("<null>");
    }
    
-   bool bind(Database* db, int idx, DBStatement* statement) const {
+   bool bind(Database* db, int idx, DBStatement* statement) const override {
       return db->bind(this, idx, statement);
    }
    

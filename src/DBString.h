@@ -39,11 +39,11 @@ public:
       return m_value;
    }
    
-   std::string valueAsString() const {
+   std::string valueAsString() const override {
       return std::string(m_value);
    }
 
-   bool bind(Database* db, int idx, DBStatement* statement) const {
+   bool bind(Database* db, int idx, DBStatement* statement) const override {
       return db->bind(this, idx, statement);
    }
    

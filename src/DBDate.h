@@ -79,7 +79,7 @@ public:
     *
     * @return
     */
-   std::string valueAsString() const;
+   std::string valueAsString() const override;
 
    /**
     *
@@ -90,7 +90,7 @@ public:
     * @see Database()
     * @see DBStatement()
     */
-   bool bind(Database* db, int idx, DBStatement* statement) const;
+   bool bind(Database* db, int idx, DBStatement* statement) const override;
 
    /**
     *

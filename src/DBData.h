@@ -54,13 +54,13 @@ public:
       return (const void*) &m_buffer[0];
    }
    
-   std::string valueAsString() const {
+   std::string valueAsString() const override {
       return std::string("<data>");
    }
 
    bool bind(Database* db,
              int idx,
-             DBStatement* statement) const {
+             DBStatement* statement) const override {
       return db->bind(this, idx, statement);
    }
 

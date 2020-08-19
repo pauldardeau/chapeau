@@ -32,10 +32,10 @@ SQLiteResultSet::~SQLiteResultSet() {
 //******************************************************************************
 
 void SQLiteResultSet::close() {
-   if (m_statement != NULL) {
+   if (m_statement != nullptr) {
       m_statement->reset();
    }
-   if (m_parentDB != NULL) {
+   if (m_parentDB != nullptr) {
       m_parentDB->setInUse(false);
    }
 }
@@ -227,7 +227,7 @@ std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
       (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
    
    if (!c) {
-      return NULL;
+      return nullptr;
    }
    
    return new std::string(c);
@@ -244,7 +244,7 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return NULL;
+      return nullptr;
    }
    
    return stringForColumnIndex(columnIdx);
@@ -261,7 +261,7 @@ DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return NULL;
+      return nullptr;
    }
 
    return dateForColumnIndex(columnIdx);
@@ -284,7 +284,7 @@ DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
    const int columnIdx = columnIndexForName(columnName);
    
    if (columnIdx == -1) {
-      return NULL;
+      return nullptr;
    }
    
    return dataForColumnIndex(columnIdx);

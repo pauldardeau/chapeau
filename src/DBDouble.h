@@ -39,13 +39,13 @@ public:
       return m_value;
    }
    
-   std::string valueAsString() const {
+   std::string valueAsString() const override {
       char buffer[20];
       snprintf(buffer, 20, "%f", m_value);
       return std::string(buffer);
    }
 
-   bool bind(Database* db, int idx, DBStatement* statement) const {
+   bool bind(Database* db, int idx, DBStatement* statement) const override {
       return db->bind(this, idx, statement);
    }
 

@@ -37,7 +37,7 @@ public:
       return m_value;
    }
    
-   std::string valueAsString() const {
+   std::string valueAsString() const override {
       if (m_value) {
          return "true";
       } else {
@@ -47,7 +47,7 @@ public:
    
    bool bind(Database* db,
              int idx,
-             DBStatement* statement) const {
+             DBStatement* statement) const override {
       return db->bind(this, idx, statement);
    }
 
