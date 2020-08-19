@@ -40,9 +40,7 @@ public:
    }
    
    std::string valueAsString() const override {
-      char buffer[20];
-      snprintf(buffer, 20, "%f", m_value);
-      return std::string(buffer);
+      return std::to_string(m_value);
    }
 
    bool bind(Database* db, int idx, DBStatement* statement) const override {
