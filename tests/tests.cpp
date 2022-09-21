@@ -5,6 +5,7 @@
 #include "test_db_statement_args.h"
 #include "test_sqlite_database.h"
 #include "test_sqlite_result_set.h"
+#include "test_sqlite_statement.h"
 
 
 void Tests::run() {
@@ -22,6 +23,9 @@ void Tests::run() {
 
    TestSQLiteResultSet test_sqlite_rs;
    test_sqlite_rs.run();
+
+   TestSQLiteStatement test_sqlite_stmt;
+   test_sqlite_stmt.run();
 }
 
 int main(int argc, char* argv[]) {
