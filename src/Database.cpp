@@ -193,6 +193,7 @@ void Database::clearCachedStatements() {
       // close the statements
       DBStatement* statement = (*it).second;
       statement->close();
+      delete statement;
    }
    
    m_cachedStatements.erase(m_cachedStatements.begin(),
