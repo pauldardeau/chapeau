@@ -23,6 +23,7 @@ void DBStatementArgs::clear() {
    for (; it != itEnd; ++it) {
       delete *it;
    }
+   m_args.erase(m_args.begin(), m_args.end());
 }
 
 //******************************************************************************
