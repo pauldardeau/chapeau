@@ -9,23 +9,23 @@
 
 
 void Tests::run() {
-   TestDatabase test_database;
-   test_database.run();
+   //TestDatabase test_database;
+   //test_database.run();
 
    TestDBDate test_dbdate;
    test_dbdate.run();
 
-   TestDBStatementArgs test_db_statement_args;
-   test_db_statement_args.run();
+   //TestDBStatementArgs test_db_statement_args;
+   //test_db_statement_args.run();
 
-   TestSQLiteDatabase test_sqlite_db;
-   test_sqlite_db.run();
+   //TestSQLiteDatabase test_sqlite_db;
+   //test_sqlite_db.run();
 
-   TestSQLiteResultSet test_sqlite_rs;
-   test_sqlite_rs.run();
+   //TestSQLiteResultSet test_sqlite_rs;
+   //test_sqlite_rs.run();
 
-   TestSQLiteStatement test_sqlite_stmt;
-   test_sqlite_stmt.run();
+   //TestSQLiteStatement test_sqlite_stmt;
+   //test_sqlite_stmt.run();
 }
 
 int main(int argc, char* argv[]) {

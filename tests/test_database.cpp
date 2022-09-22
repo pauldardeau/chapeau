@@ -29,65 +29,81 @@ void TestDatabase::runTests() {
 
 void TestDatabase::test_bind_null() {
    TEST_CASE("test_bind_null");
+   //TODO: implement test_bind_null
 }
 
 void TestDatabase::test_bind_bool() {
    TEST_CASE("test_bind_bool");
+   //TODO: implement test_bind_bool
 }
 
 void TestDatabase::test_bind_int() {
    TEST_CASE("test_bind_int");
+   //TODO: implement test_bind_int
 }
 
 void TestDatabase::test_bind_long() {
    TEST_CASE("test_bind_long");
+   //TODO: implement test_bind_long
 }
 
 void TestDatabase::test_bind_float() {
    TEST_CASE("test_bind_float");
+   //TODO: implement test_bind_float
 }
 
 void TestDatabase::test_bind_double() {
    TEST_CASE("test_bind_double");
+   //TODO: implement test_bind_double
 }
 
 void TestDatabase::test_bind_string() {
    TEST_CASE("test_bind_string");
+   //TODO: implement test_bind_string
 }
 
 void TestDatabase::test_bind_data() {
    TEST_CASE("test_bind_data");
+   //TODO: implement test_bind_data
 }
 
 void TestDatabase::test_bind_date() {
    TEST_CASE("test_bind_date");
+   //TODO: implement test_bind_date
 }
 
 void TestDatabase::test_shouldCacheStatements() {
    TEST_CASE("test_shouldCacheStatements");
+   //TODO: implement test_shouldCacheStatements
 }
 
 void TestDatabase::test_setShouldCacheStatements() {
    TEST_CASE("test_setShouldCacheStatements");
+   //TODO: implement test_setShouldCacheStatements
 }
 
 void TestDatabase::test_cachedStatementForQuery() {
    TEST_CASE("test_cachedStatementForQuery");
+   //TODO: implement test_cachedStatementForQuery
 }
 
 void TestDatabase::test_setCachedStatement() {
    TEST_CASE("test_setCachedStatement");
+   //TODO: implement test_setCachedStatement
 }
 
 void TestDatabase::test_clearCachedStatements() {
    TEST_CASE("test_clearCachedStatements");
+   //TODO: implement test_clearCachedStatements
 }
 
 void TestDatabase::test_resultset_query() {
    TEST_CASE("test_resultset_query");
+   //TODO: implement test_resultset_query
 }
 
 void TestDatabase::test_resultset_setQuery() {
    TEST_CASE("test_resultset_setQuery");
+   //TODO: implement test_resultset_setQuery
 }
 
