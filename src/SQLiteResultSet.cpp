@@ -34,6 +34,10 @@ SQLiteResultSet::~SQLiteResultSet() {
 void SQLiteResultSet::close() {
    if (m_statement != NULL) {
       m_statement->reset();
+      if (!m_statement->isCached()) {
+         delete m_statement;
+	 m_statement = NULL;
+      }
    }
    if (m_parentDB != NULL) {
       m_parentDB->setInUse(false);
