@@ -137,6 +137,7 @@ bool SQLiteDatabase::goodConnection() {
    
    if (rs != NULL) {
       rs->close();
+      delete rs;
       return true;
    }
    
@@ -432,7 +433,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
    }
    
    if (!statement) {
-      statement = new SQLiteStatement(pStmt);
+      statement = new SQLiteStatement(pStmt, cacheStatements);
       
       if (cacheStatements) {
          setCachedStatement(statement,sql);
@@ -522,7 +523,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    const size_t argCount = args.size();
    
    if (!statement) {
-      statement = new SQLiteStatement(pStmt);
+      statement = new SQLiteStatement(pStmt, cacheStatements);
       
       if (cacheStatements) {
          setCachedStatement(statement, sql);
@@ -692,7 +693,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
    assert(rc != SQLITE_ROW);
    
    if (cacheStatements && !cachedStmt) {
-      cachedStmt = new SQLiteStatement(pStmt);
+      cachedStmt = new SQLiteStatement(pStmt, true);
       setCachedStatement(cachedStmt, sql);
    }
    
@@ -785,7 +786,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const size_t argsCount = args.size();
    
    if (!cachedStmt) {
-      cachedStmt = new SQLiteStatement(pStmt);
+      cachedStmt = new SQLiteStatement(pStmt, cacheStatements);
       
       if (cacheStatements) {
          setCachedStatement(cachedStmt, sql);
@@ -818,6 +819,9 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
                sql.c_str());
       ::sqlite3_finalize(pStmt);
+      if ((cachedStmt != NULL) && !cacheStatements) {
+         delete cachedStmt;
+      }
       return false;
    }
    
@@ -867,8 +871,13 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    assert(rc != SQLITE_ROW);
    
    if (cachedStmt) {
-      cachedStmt->incrementUseCount();
       rc = ::sqlite3_reset(pStmt);
+      if (cacheStatements) {
+         cachedStmt->incrementUseCount();
+      } else {
+         delete cachedStmt;
+	 cachedStmt = NULL;
+      }
    } else {
       /* Finalize the virtual machine. This releases all memory and other
        ** resources allocated by the sqlite3_prepare() call above.
@@ -1010,9 +1019,10 @@ void SQLiteDatabase::setBusyRetryTimeout(int busyRetryTimeout) {
 //******************************************************************************
 //******************************************************************************
 
-SQLiteStatement::SQLiteStatement(sqlite3_stmt* value) :
+SQLiteStatement::SQLiteStatement(sqlite3_stmt* value, bool isCached) :
    m_statement(value),
-   m_useCount(0L) {   
+   m_useCount(0L),
+   m_isCached(isCached) {   
 }
 
 //******************************************************************************
@@ -1070,9 +1080,15 @@ void SQLiteStatement::incrementUseCount() {
 
 //******************************************************************************
 
+bool SQLiteStatement::isCached() const {
+   return m_isCached;
+}
+
+//******************************************************************************
+
 std::string SQLiteStatement::description() const {
    char szBuffer[128];
-   ::snprintf(szBuffer, 128, "%ld hit(s) for query\n", useCount());
+   ::snprintf(szBuffer, 128, "%ld use(s) for query\n", useCount());
    std::string desc = szBuffer;
    desc += m_query;
    return desc;

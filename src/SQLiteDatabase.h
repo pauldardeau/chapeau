@@ -117,29 +117,30 @@ private:
 
 
 class SQLiteStatement : public DBStatement {
+public:
+   SQLiteStatement(sqlite3_stmt* value, bool isCached);
+   ~SQLiteStatement();
    
-   public:
-      SQLiteStatement(sqlite3_stmt* value);
-      ~SQLiteStatement();
+   void close();
+   void reset();
+
+   sqlite3_stmt* statement();
+
+   const std::string& query() const;
+   void setQuery(const std::string& value);
+
+   long useCount() const;
+   void incrementUseCount();
+   bool isCached() const;
    
-      void close();
-      void reset();
-
-      sqlite3_stmt* statement();
-
-      const std::string& query() const;
-      void setQuery(const std::string& value);
-
-      long useCount() const;
-      void incrementUseCount();
-   
-      std::string description() const;
+   std::string description() const;
 
 
 private:
    sqlite3_stmt* m_statement;
    std::string m_query;
    long m_useCount;
+   bool m_isCached;
 
    SQLiteStatement();
    SQLiteStatement(const SQLiteStatement&);
