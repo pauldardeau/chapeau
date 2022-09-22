@@ -21,7 +21,7 @@ DBDate::DBDate(double timeIntervalSince1970) :
 
 //******************************************************************************
 
-DBDate::DBDate(const chaudiere::DateTime dateTime) :
+DBDate::DBDate(const chaudiere::DateTime& dateTime) :
    DBAbstractDataType(DB_DATE_TYPE_NAME),
    m_dateTime(dateTime) {
 }

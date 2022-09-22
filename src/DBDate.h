@@ -30,7 +30,7 @@ public:
     * @param dateTime
     * @see chaudiere::DateTime()
     */
-   DBDate(const chaudiere::DateTime dateTime);
+   DBDate(const chaudiere::DateTime& dateTime);
    
    /**
     *
