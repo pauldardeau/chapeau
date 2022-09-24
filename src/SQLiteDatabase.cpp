@@ -567,13 +567,16 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
 //******************************************************************************
 
-bool SQLiteDatabase::executeUpdate(const std::string& sql) {
+bool SQLiteDatabase::executeUpdate(const std::string& sql,
+                                   unsigned long& rowsAffectedCount) {
    if (NULL == m_db) {
+      rowsAffectedCount = 0L;
       ::printf("error: no database connection\n");
       return false;
    }
 
    if (m_inUse) {
+      rowsAffectedCount = 0L;
       complainAboutInUse();
       return false;
    }
@@ -616,6 +619,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
                Logger::warning("Database busy");
                ::sqlite3_finalize(pStmt);
                setInUse(false);
+	       rowsAffectedCount = 0L;
                return false;
             }
          } else if (SQLITE_OK != rc) {
@@ -631,6 +635,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
             }
             
             setInUse(false);
+	    rowsAffectedCount = 0L;
             
             return false;
          }
@@ -644,6 +649,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
                sql.c_str());
       ::sqlite3_finalize(pStmt);
       setInUse(false);
+      rowsAffectedCount = 0L;
       return false;
    }
    
@@ -706,6 +712,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
        */
       rc = ::sqlite3_finalize(pStmt);
    }
+
+   rowsAffectedCount = ::sqlite3_changes64(m_db);
    
    setInUse(false);
    
@@ -715,14 +723,17 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql) {
 //******************************************************************************
 
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
-                                   const DBStatementArgs& args) {
+                                   const DBStatementArgs& args,
+                                   unsigned long& affectedRowsCount) {
    if (NULL == m_db) {
       ::printf("error: no database connection\n");
+      affectedRowsCount = 0L;
       return false;
    }
 
    if (m_inUse) {
       complainAboutInUse();
+      affectedRowsCount = 0L;
       return false;
    }
   
@@ -763,6 +774,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
                         m_databasePath.c_str());
                Logger::warning("Database busy");
                ::sqlite3_finalize(pStmt);
+	       affectedRowsCount = 0L;
                return false;
             }
          } else if (SQLITE_OK != rc) {
@@ -776,6 +788,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
                if (m_crashOnErrors) {
                }
             }
+	    affectedRowsCount = 0L;
             
             return false;
          }
@@ -822,6 +835,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       if ((cachedStmt != NULL) && !cacheStatements) {
          delete cachedStmt;
       }
+      affectedRowsCount = 0L;
       return false;
    }
    
@@ -884,6 +898,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
        */
       rc = ::sqlite3_finalize(pStmt);
    }
+
+   affectedRowsCount = ::sqlite3_changes64(m_db);
    
    return (rc == SQLITE_OK);
 }
@@ -891,7 +907,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 //******************************************************************************
 
 bool SQLiteDatabase::rollback() {
-   const bool b = executeUpdate("ROLLBACK TRANSACTION;");
+   unsigned long rowsAffectedCount = 0L;
+   const bool b = executeUpdate("ROLLBACK TRANSACTION;", rowsAffectedCount);
    if (b) {
       m_inTransaction = false;
    }
@@ -902,7 +919,8 @@ bool SQLiteDatabase::rollback() {
 //******************************************************************************
 
 bool SQLiteDatabase::commit() {
-   const bool b = executeUpdate("COMMIT TRANSACTION;");
+   unsigned long rowsAffectedCount = 0L;
+   const bool b = executeUpdate("COMMIT TRANSACTION;", rowsAffectedCount);
    if (b) {
       m_inTransaction = false;
    }
@@ -913,7 +931,8 @@ bool SQLiteDatabase::commit() {
 //******************************************************************************
 
 bool SQLiteDatabase::beginDeferredTransaction() {
-   const bool b = executeUpdate("BEGIN DEFERRED TRANSACTION;");
+   unsigned long rowsAffectedCount = 0L;
+   const bool b = executeUpdate("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
    if (b) {
       m_inTransaction = true;
    }
@@ -924,7 +943,8 @@ bool SQLiteDatabase::beginDeferredTransaction() {
 //******************************************************************************
 
 bool SQLiteDatabase::beginTransaction() {
-   const bool b = executeUpdate("BEGIN EXCLUSIVE TRANSACTION;");
+   unsigned long rowsAffectedCount = 0L;
+   const bool b = executeUpdate("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
    if (b) {
       m_inTransaction = true;
    }

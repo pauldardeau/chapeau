@@ -285,7 +285,8 @@ public:
     * @param sql
     * @return
     */
-   virtual bool executeUpdate(const std::string& sql) = 0;
+   virtual bool executeUpdate(const std::string& sql,
+                              unsigned long& rowsAffectedCount) = 0;
    
    /**
     *
@@ -295,7 +296,8 @@ public:
     * @see DBStatementArgs()
     */
    virtual bool executeUpdate(const std::string& sql,
-                              const DBStatementArgs& args) = 0;
+                              const DBStatementArgs& args,
+                              unsigned long& rowsAffectedCount) = 0;
    
    /**
     *

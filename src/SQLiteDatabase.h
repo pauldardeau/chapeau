@@ -57,9 +57,11 @@ public:
 
    sqlite3* sqliteHandle();
 
-   bool executeUpdate(const std::string& sql);
    bool executeUpdate(const std::string& sql,
-                      const DBStatementArgs& args);
+                      unsigned long& rowsAffectedCount);
+   bool executeUpdate(const std::string& sql,
+                      const DBStatementArgs& args,
+                      unsigned long& rowsAffectedCount);
 
    DBResultSet* executeQuery(const std::string& sql);
    DBResultSet* executeQuery(const std::string& sql,
