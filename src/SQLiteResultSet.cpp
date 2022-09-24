@@ -36,7 +36,7 @@ void SQLiteResultSet::close() {
       m_statement->reset();
       if (!m_statement->isCached()) {
          delete m_statement;
-	 m_statement = NULL;
+         m_statement = NULL;
       }
    }
    if (m_parentDB != NULL) {
@@ -50,17 +50,17 @@ void SQLiteResultSet::setupColumnNames() {
    if (!m_columnNameToIndexMap.empty()) {
       m_columnNameToIndexMap.erase(m_columnNameToIndexMap.begin(),
                                    m_columnNameToIndexMap.end());
-   }	
-   
+   }
+
    const int columnCount = sqlite3_column_count(m_statement->statement());
-   
+
    for (int columnIdx = 0; columnIdx < columnCount; ++columnIdx) {
       std::string columnName =
          sqlite3_column_name(m_statement->statement(), columnIdx);
       StrUtils::toLowerCase(columnName);
       m_columnNameToIndexMap[columnName] = columnIdx;
    }
-   
+
    m_columnNamesSetup = true;
 }
 
@@ -71,7 +71,7 @@ bool SQLiteResultSet::next() {
    bool retry;
    int numberOfRetries = 0;
    const int parentBusyRetryTimeout = m_parentDB->busyRetryTimeout();
-   
+
    do {
       retry = false;
 
@@ -82,7 +82,7 @@ bool SQLiteResultSet::next() {
          // in that case, retry the step... and maybe wait just 10 milliseconds.
          retry = true;
          usleep(20);
-         
+
          if (parentBusyRetryTimeout && (numberOfRetries++ > parentBusyRetryTimeout)) {
             ::printf("%s:%d Database busy (%s)\n",
                      __FUNCTION__,
@@ -110,11 +110,11 @@ bool SQLiteResultSet::next() {
          break;
       }
    } while (retry);
-   
+
    if (rc != SQLITE_ROW) {
       close();
    }
-   
+
    return (rc == SQLITE_ROW);
 }
 
@@ -125,21 +125,21 @@ int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    std::string lowerColumnName = columnName;
    StrUtils::toLowerCase(lowerColumnName);
-   
+
    const std::map<std::string, int>::const_iterator it =
       m_columnNameToIndexMap.find(lowerColumnName);
-   
+
    if (it != m_columnNameToIndexMap.end()) {
       return (*it).second;
    }
-   
+
    Logger::warning(std::string("Could not find the column named '") +
                    columnName +
                    std::string("'"));
-   
+
    return -1;
 }
 
@@ -150,13 +150,13 @@ int SQLiteResultSet::intForColumn(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return 0;
    }
-   
+
    return sqlite3_column_int(m_statement->statement(), columnIdx);
 }
 
@@ -173,13 +173,13 @@ long SQLiteResultSet::longForColumn(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return 0;
    }
-   
+
    return (long)sqlite3_column_int64(m_statement->statement(), columnIdx);
 }
 
@@ -208,13 +208,13 @@ double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return 0;
    }
-   
+
    return sqlite3_column_double(m_statement->statement(), columnIdx);
 }
 
@@ -229,11 +229,11 @@ double SQLiteResultSet::doubleForColumnIndex(int columnIdx) const {
 std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
    const char *c =
       (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
-   
+
    if (!c) {
       return NULL;
    }
-   
+
    return new std::string(c);
 }
 
@@ -244,13 +244,13 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return NULL;
    }
-   
+
    return stringForColumnIndex(columnIdx);
 }
 
@@ -261,9 +261,9 @@ DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return NULL;
    }
@@ -284,13 +284,13 @@ DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;
       pThis->setupColumnNames();
    }
-   
+
    const int columnIdx = columnIndexForName(columnName);
-   
+
    if (columnIdx == -1) {
       return NULL;
    }
-   
+
    return dataForColumnIndex(columnIdx);
 }
 

@@ -39,7 +39,7 @@ bool Database::bind(const DBBool* boolWrapper,
    } else {
       rc = bindBool(boolWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -54,7 +54,7 @@ bool Database::bind(const DBInt* intWrapper,
    } else {
       rc = bindInt(intWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -69,7 +69,7 @@ bool Database::bind(const DBLong* longWrapper,
    } else {
       rc = bindLong(longWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -84,7 +84,7 @@ bool Database::bind(const DBFloat* floatWrapper,
    } else {
       rc = bindFloat(floatWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -99,7 +99,7 @@ bool Database::bind(const DBDouble* doubleWrapper,
    } else {
       rc = bindDouble(doubleWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -114,7 +114,7 @@ bool Database::bind(const DBString* stringWrapper,
    } else {
       rc = bindString(stringWrapper->value(), idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -129,7 +129,7 @@ bool Database::bind(const DBData* data,
    } else {
       rc = bindData(data, idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -144,7 +144,7 @@ bool Database::bind(const DBDate* date,
    } else {
       rc = bindDate(date, idx, statement);
    }
-   
+
    return rc;
 }
 
@@ -158,7 +158,7 @@ bool Database::shouldCacheStatements() const {
 
 void Database::setShouldCacheStatements(bool value) {
    m_shouldCacheStatements = value;
-   
+
    if (!m_shouldCacheStatements) {
       clearCachedStatements();
    }
@@ -171,7 +171,7 @@ DBStatement* Database::cachedStatementForQuery(const std::string& query) {
    if (it != m_cachedStatements.end()) {
       return (*it).second;
    }
-   
+
    return NULL;
 }
 
@@ -188,14 +188,14 @@ void Database::setCachedStatement(DBStatement* statement,
 void Database::clearCachedStatements() {
    map<string,DBStatement*>::iterator it = m_cachedStatements.begin();
    map<string,DBStatement*>::const_iterator itEnd = m_cachedStatements.end();
-   
+
    for (; it != itEnd; ++it) {
       // close the statements
       DBStatement* statement = (*it).second;
       statement->close();
       delete statement;
    }
-   
+
    m_cachedStatements.erase(m_cachedStatements.begin(),
                             m_cachedStatements.end());
 }

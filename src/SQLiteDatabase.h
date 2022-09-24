@@ -25,7 +25,7 @@ class DBData;
 
 
 class SQLiteDatabase : public Database {
-   
+
 public:
    SQLiteDatabase(const std::string& inPath);
    ~SQLiteDatabase();
@@ -95,7 +95,7 @@ public:
 
    static std::string sqliteLibVersion();
 
-   
+
 protected:
    void complainAboutInUse();
 
@@ -122,7 +122,7 @@ class SQLiteStatement : public DBStatement {
 public:
    SQLiteStatement(sqlite3_stmt* value, bool isCached);
    ~SQLiteStatement();
-   
+
    void close();
    void reset();
 
@@ -134,7 +134,7 @@ public:
    long useCount() const;
    void incrementUseCount();
    bool isCached() const;
-   
+
    std::string description() const;
 
 

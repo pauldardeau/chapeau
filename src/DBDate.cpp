@@ -34,14 +34,14 @@ DBDate::DBDate(const std::string& dateAsString) :
 }
 
 //******************************************************************************
-   
+
 DBDate::DBDate(const DBDate& copy) :
    DBAbstractDataType(copy),
    m_dateTime(copy.m_dateTime) {
 }
 
 //******************************************************************************
-   
+
 DBDate::~DBDate() {
 }
 
@@ -51,11 +51,11 @@ DBDate& DBDate::operator=(const DBDate& copy) {
    if (this == &copy) {
       return *this;
    }
-      
+
    DBAbstractDataType::operator=(copy);
-   
+
    m_dateTime = copy.m_dateTime;
-      
+
    return *this;
 }
 
@@ -78,7 +78,7 @@ std::string DBDate::stringValue() const {
 }
 
 //******************************************************************************
-   
+
 std::string DBDate::valueAsString() const {
    return stringValue();
 }

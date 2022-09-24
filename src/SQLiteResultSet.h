@@ -31,12 +31,12 @@ public:
    SQLiteResultSet(SQLiteStatement* statement,
                    SQLiteDatabase* db,
                    const std::string& query);
-   
+
    /**
     * Destructor
     */
    ~SQLiteResultSet();
-   
+
    /**
     *
     */
@@ -48,14 +48,14 @@ public:
     * @return
     */
    int columnIndexForName(const std::string& columnName) const;
-   
+
    /**
     *
     * @return
     * @see SQLiteStatement()
     */
    SQLiteStatement* statement();
-   
+
    /**
     *
     * @param value
@@ -82,7 +82,7 @@ public:
     * @return
     */
    int intForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -96,7 +96,7 @@ public:
     * @return
     */
    long longForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -110,7 +110,7 @@ public:
     * @return
     */
    bool boolForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -124,7 +124,7 @@ public:
     * @return
     */
    double doubleForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -138,7 +138,7 @@ public:
     * @return
     */
    std::string* stringForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -153,7 +153,7 @@ public:
     * @see DBDate()
     */
    DBDate* dateForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -161,7 +161,7 @@ public:
     * @see DBDate()
     */
    DBDate* dateForColumnIndex(int columnIdx) const;
-   
+
    /**
     *
     * @param columnName
@@ -169,7 +169,7 @@ public:
     * @see DBData()
     */
    DBData* dataForColumn(const std::string& columnName) const;
-   
+
    /**
     *
     * @param columnIdx
@@ -177,8 +177,8 @@ public:
     * @see DBData()
     */
    DBData* dataForColumnIndex(int columnIdx) const;
-   
-   
+
+
 protected:
    /**
     *

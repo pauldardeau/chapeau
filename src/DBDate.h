@@ -12,43 +12,43 @@ namespace chapeau {
  *
  */
 class DBDate : public DBAbstractDataType {
-   
+
 public:
    /**
     * Default constructor
     */
    DBDate();
-   
+
    /**
     *
     * @param timeIntervalSince1970
     */
    DBDate(double timeIntervalSince1970);
-   
+
    /**
     *
     * @param dateTime
     * @see chaudiere::DateTime()
     */
    DBDate(const chaudiere::DateTime& dateTime);
-   
+
    /**
     *
     * @param dateAsString
     */
    DBDate(const std::string& dateAsString);
-   
+
    /**
     * Copy constructor
     * @param copy the source of the copy
     */
    DBDate(const DBDate& copy);
-   
+
    /**
     * Destructor
     */
    ~DBDate();
-   
+
    /**
     * Copy operator
     * @param copy the source of the copy
@@ -62,19 +62,19 @@ public:
     * @see chaudiere::DateTime()
     */
    const chaudiere::DateTime& getDateTime() const;
-   
+
    /**
     *
     * @return
     */
    double timeIntervalSince1970() const;
-   
+
    /**
     *
     * @return
     */
    std::string stringValue() const;
-   
+
    /**
     *
     * @return
@@ -98,7 +98,7 @@ public:
     */
    static std::string typeNameAsString();
 
-   
+
 private:
    chaudiere::DateTime m_dateTime;
 

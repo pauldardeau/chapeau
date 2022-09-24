@@ -37,19 +37,19 @@ public:
     * Destructor
     */
    virtual ~Database() {}
-   
+
    /**
     *
     * @return
     */
    virtual long long int lastInsertRowId() = 0;
-   
+
    /**
     *
     * @return
     */
    virtual bool commit() = 0;
-   
+
    /**
     *
     * @return
@@ -68,7 +68,7 @@ public:
    virtual bool bind(const DBNull* nullWrapper,
                      int idx,
                      DBStatement* statement);
-   
+
    /**
     *
     * @param boolWrapper
@@ -81,7 +81,7 @@ public:
    virtual bool bind(const DBBool* boolWrapper,
                      int idx,
                      DBStatement* statement);
-   
+
    /**
     *
     * @param intWrapper
@@ -94,7 +94,7 @@ public:
    virtual bool bind(const DBInt* intWrapper,
                      int idx,
                      DBStatement* statement);
-   
+
    /**
     *
     * @param longWrapper
@@ -107,7 +107,7 @@ public:
    virtual bool bind(const DBLong* longWrapper,
                      int idx,
                      DBStatement* statement);
-   
+
    /**
     *
     * @param floatWrapper
@@ -159,7 +159,7 @@ public:
    virtual bool bind(const DBDate* date,
                      int idx,
                      DBStatement* statement);
-   
+
    /**
     *
     * @param data
@@ -185,7 +185,7 @@ public:
    virtual bool bindData(const DBData* data,
                          int idx,
                          DBStatement* statement) = 0;
-   
+
    /**
     *
     * @param value
@@ -210,7 +210,7 @@ public:
    virtual bool bindBool(bool value,
                          int idx,
                          DBStatement* statement) = 0;
-   
+
    /**
     *
     * @param value
@@ -287,7 +287,7 @@ public:
     */
    virtual bool executeUpdate(const std::string& sql,
                               unsigned long& rowsAffectedCount) = 0;
-   
+
    /**
     *
     * @param sql
@@ -298,7 +298,7 @@ public:
    virtual bool executeUpdate(const std::string& sql,
                               const DBStatementArgs& args,
                               unsigned long& rowsAffectedCount) = 0;
-   
+
    /**
     *
     * @param sql
@@ -306,7 +306,7 @@ public:
     * @see DBResultSet()
     */
    virtual DBResultSet* executeQuery(const std::string& sql) = 0;
-   
+
    /**
     *
     * @param sql
@@ -316,20 +316,20 @@ public:
     */
    virtual DBResultSet* executeQuery(const std::string& sql,
                                      const DBStatementArgs& args) = 0;
-   
+
    /**
     *
     * @return
     */
    bool shouldCacheStatements() const;
-   
+
    /**
     *
     * @param value
     * @return
     */
    void setShouldCacheStatements(bool value);
-   
+
    /**
     *
     * @param statement
@@ -339,7 +339,7 @@ public:
     */
    void setCachedStatement(DBStatement* statement,
                            const std::string& query);
-   
+
    /**
     *
     * @param query
@@ -347,7 +347,7 @@ public:
     * @see DBStatement()
     */
    DBStatement* cachedStatementForQuery(const std::string& query);
-   
+
    /**
     *
     */
@@ -358,12 +358,12 @@ public:
     * @return
     */
    virtual bool open() = 0;
-   
+
   /**
    *
    */
    virtual void close() = 0;
-   
+
   /**
    *
    * @return
@@ -390,122 +390,122 @@ public:
     * Destructor
     */
    virtual ~DBResultSet() {}
-   
+
    /**
     *
     * @return
     */
    virtual bool next() = 0;
-   
+
    /**
     *
     */
    virtual void close() = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual int intForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIndex
     * @return
     */
    virtual int intForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual long longForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual long longForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual bool boolForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual bool boolForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual double doubleForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual double doubleForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual std::string* stringForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual std::string* stringForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual DBDate* dateForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual DBDate* dateForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @param columnName
     * @return
     */
    virtual DBData* dataForColumn(const std::string& columnName) const = 0;
-   
+
    /**
     *
     * @param columnIdx
     * @return
     */
    virtual DBData* dataForColumnIndex(int columnIdx) const = 0;
-   
+
    /**
     *
     * @return
     */
    virtual const std::string& query() const;
-   
+
    /**
     *
     * @param query
@@ -523,13 +523,13 @@ public:
     * Destructor
     */
    virtual ~DBStatement() {}
-   
+
    /**
     *
     * @param query
     */
    virtual void setQuery(const std::string& query) = 0;
-   
+
    /**
     *
     */
