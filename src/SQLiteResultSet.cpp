@@ -324,3 +324,40 @@ void SQLiteResultSet::setStatement(SQLiteStatement* value) {
 
 //******************************************************************************
 
+int SQLiteResultSet::getColumnCount() const {
+   return sqlite3_column_count(m_statement->statement());
+}
+
+//******************************************************************************
+
+DBValueType SQLiteResultSet::getTypeForColumnIndex(int columnIndex) const {
+   const int colType = sqlite3_column_type(m_statement->statement(),
+                                           columnIndex);
+   DBValueType dbValueType;
+
+   switch (colType) {
+      case SQLITE_INTEGER:
+         dbValueType = ValueTypeInteger;
+         break;
+      case SQLITE_FLOAT:
+         dbValueType = ValueTypeFloat;
+         break;
+      case SQLITE_TEXT:
+         dbValueType = ValueTypeText;
+         break;
+      case SQLITE_BLOB:
+         dbValueType = ValueTypeBlob;
+         break;
+      case SQLITE_NULL:
+         dbValueType = ValueTypeNull;
+         break;
+      default:
+         dbValueType = ValueTypeUnknown;
+	 break;
+   }
+
+   return dbValueType;
+}
+
+//******************************************************************************
+

@@ -178,6 +178,10 @@ public:
     */
    DBData* dataForColumnIndex(int columnIdx) const;
 
+   int getColumnCount() const;
+   
+   DBValueType getTypeForColumnIndex(int columnIndex) const;
+
 
 protected:
    /**

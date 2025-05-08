@@ -22,6 +22,20 @@ class DBStatementArgs;
 class DBResultSet;
 
 
+enum DBValueType {
+   ValueTypeInteger = 1,
+   ValueTypeFloat   = 2,
+   ValueTypeText    = 3,
+   ValueTypeBlob    = 4,
+   ValueTypeNull    = 5,
+   ValueTypeLong    = 6,
+   ValueTypeBoolean = 7,
+   ValueTypeDouble  = 8,
+   ValueTypeDate    = 9,
+   ValueTypeTimestamp = 10,
+   ValueTypeUnknown = 11
+};
+
 /**
  *
  */
@@ -511,6 +525,10 @@ public:
     * @param query
     */
    virtual void setQuery(const std::string& query);
+
+   virtual int getColumnCount() const = 0;
+   
+   virtual DBValueType getTypeForColumnIndex(int columnIndex) const = 0;
 };
 
 /**

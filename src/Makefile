@@ -9,21 +9,28 @@ ARCHIVE_CMD = ar
 ARCHIVE_OPTS = rs
 
 LIB_NAME = libchapeau.so
+EXE_NAME = query
 
-OBJS = Database.o \
+EXE_OBJS = query.o
+
+LIB_OBJS = Database.o \
 DBDate.o \
 DBStatementArgs.o \
 SQLiteDatabase.o \
 SQLiteResultSet.o
 
-all : $(LIB_NAME)
+all : $(LIB_NAME) $(EXE_NAME)
 
 clean :
 	rm -f *.o
 	rm -f $(LIB_NAME)
-	
-$(LIB_NAME) : $(OBJS)
-	$(CXX) -shared -fPIC $(OBJS) -o $(LIB_NAME)
+	rm -f $(EXE_NAME)
+
+$(EXE_NAME) : $(EXE_OBJS)
+	$(CXX) $(EXE_OBJS) -o $(EXE_NAME) ./libchapeau.so ../../chaudiere/src/libchaudiere.so -lsqlite3
+
+$(LIB_NAME) : $(LIB_OBJS)
+	$(CXX) -shared -fPIC $(LIB_OBJS) -o $(LIB_NAME) ../../chaudiere/src/libchaudiere.so -lsqlite3
 
 %.o : %.cpp
 	$(CXX) $(CXX_OPTS) $< -o $@
