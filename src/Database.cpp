@@ -186,12 +186,9 @@ void Database::setCachedStatement(DBStatement* statement,
 //******************************************************************************
 
 void Database::clearCachedStatements() {
-   map<string,DBStatement*>::iterator it = m_cachedStatements.begin();
-   map<string,DBStatement*>::const_iterator itEnd = m_cachedStatements.end();
-
-   for (; it != itEnd; ++it) {
+   for (auto& pair : m_cachedStatements) {
       // close the statements
-      DBStatement* statement = (*it).second;
+      DBStatement* statement = pair.second;
       statement->close();
       delete statement;
    }

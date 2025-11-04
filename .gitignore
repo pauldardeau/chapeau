@@ -1,2 +1,4 @@
 *.o
 *.so
+src/query
+tests/test_chapeau

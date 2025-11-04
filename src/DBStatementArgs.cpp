@@ -17,11 +17,8 @@ DBStatementArgs::~DBStatementArgs() {
 //******************************************************************************
 
 void DBStatementArgs::clear() {
-   std::vector<DBAbstractDataType*>::iterator it = m_args.begin();
-   const std::vector<DBAbstractDataType*>::const_iterator itEnd = m_args.end();
-
-   for (; it != itEnd; ++it) {
-      delete *it;
+   for (auto& dt : m_args) {
+      delete dt;
    }
    m_args.erase(m_args.begin(), m_args.end());
 }
