@@ -23,7 +23,7 @@ int main(int argc, char** pszArgs)
    SQLiteDatabase db(dbFilePath); 
    if (db.open()) {
       DBResultSet* rs = db.executeQuery(dbQuery);
-      if (rs != NULL) {
+      if (rs != nullptr) {
          const int columnCount = rs->getColumnCount();
          while (rs->next()) {
             for (int i = 0; i < columnCount; i++) {
@@ -37,7 +37,7 @@ int main(int argc, char** pszArgs)
                   printf("%f", rs->doubleForColumnIndex(i));
                } else if (dbValueType == ValueTypeText) {
                   string* s = rs->stringForColumnIndex(i);
-                  if (s != NULL) {
+                  if (s != nullptr) {
                      printf("%s", s->c_str());
                      delete s;
                   }

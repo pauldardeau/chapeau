@@ -44,7 +44,7 @@ private:
 //******************************************************************************
 
 SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
-   m_db(NULL),
+   m_db(nullptr),
    m_databasePath(aPath),
    m_logsErrors(false),
    m_crashOnErrors(false),
@@ -122,7 +122,7 @@ void SQLiteDatabase::close() {
       }
    } while (retry);
 
-   m_db = NULL;
+   m_db = nullptr;
 }
 
 //******************************************************************************
@@ -135,7 +135,7 @@ bool SQLiteDatabase::goodConnection() {
    DBResultSet* rs =
       executeQuery("select name from sqlite_master where type='table'");
 
-   if (rs != NULL) {
+   if (rs != nullptr) {
       rs->close();
       delete rs;
       return true;
@@ -342,21 +342,21 @@ bool SQLiteDatabase::bindString(const std::string& value,
 //******************************************************************************
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
-   if (NULL == m_db) {
+   if (nullptr == m_db) {
       ::printf("error: no database connection\n");
-      return NULL;
+      return nullptr;
    }
 
    if (m_inUse) {
       complainAboutInUse();
-      return NULL;
+      return nullptr;
    }
 
    MarkInUse inuse(this);
 
    int rc = 0;
-   sqlite3_stmt* pStmt = NULL;
-   SQLiteStatement* statement = NULL;
+   sqlite3_stmt* pStmt = nullptr;
+   SQLiteStatement* statement = nullptr;
 
    if (m_traceExecution && !sql.empty()) {
       ::printf("executeQuery: %s (%s)\n", sql.c_str(), m_databasePath.c_str());
@@ -366,7 +366,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
    if (cacheStatements) {
       statement = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
-      pStmt = statement ? statement->statement() : NULL;
+      pStmt = statement ? statement->statement() : nullptr;
    }
 
    int numberOfRetries = 0;
@@ -388,7 +388,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
                         m_databasePath.c_str());
                Logger::warning("Database busy");
                ::sqlite3_finalize(pStmt);
-               return NULL;
+               return nullptr;
             }
          } else if (SQLITE_OK != rc) {
             ::sqlite3_finalize(pStmt);
@@ -402,7 +402,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
                }
             }
 
-            return NULL;
+            return nullptr;
          }
       } while (retry);
    }
@@ -412,7 +412,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
    if (0 != queryCount) {
       Logger::error("the bind count is not correct for the # of variables (executeQuery)");
       ::sqlite3_finalize(pStmt);
-      return NULL;
+      return nullptr;
    }
 
    if (!statement) {
@@ -433,21 +433,21 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                                           const DBStatementArgs& args) {
-   if (NULL == m_db) {
+   if (nullptr == m_db) {
       ::printf("error: no database connection\n");
-      return NULL;
+      return nullptr;
    }
 
    if (m_inUse) {
       complainAboutInUse();
-      return NULL;
+      return nullptr;
    }
 
    MarkInUse inUse(this);
 
    int rc = 0;
-   sqlite3_stmt* pStmt = NULL;
-   SQLiteStatement* statement = NULL;
+   sqlite3_stmt* pStmt = nullptr;
+   SQLiteStatement* statement = nullptr;
 
    if (m_traceExecution && !sql.empty()) {
       ::printf("executeQuery: %s (%s)\n",
@@ -459,7 +459,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    if (cacheStatements) {
       statement = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
-      pStmt = statement ? statement->statement() : NULL;
+      pStmt = statement ? statement->statement() : nullptr;
    }
 
    int numberOfRetries = 0;
@@ -481,7 +481,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                         m_databasePath.c_str());
                Logger::warning("Database busy");
                ::sqlite3_finalize(pStmt);
-               return NULL;
+               return nullptr;
             }
          } else if (SQLITE_OK != rc) {
             ::sqlite3_finalize(pStmt);
@@ -495,7 +495,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                }
             }
 
-            return NULL;
+            return nullptr;
          }
       } while (retry);
    }
@@ -516,7 +516,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    for (; idx < argCount; ++idx) {
       const DBAbstractDataType* arg = args[idx];
 
-      if (arg != NULL) {
+      if (arg != nullptr) {
          if (m_traceExecution) {
             ::printf("obj: %s (%s)\n",
                      arg->valueAsString().c_str(),
@@ -536,7 +536,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    if (idx != queryCount) {
       Logger::error("the bind count is not correct for the # of variables (executeQuery)");
       ::sqlite3_finalize(pStmt);
-      return NULL;
+      return nullptr;
    }
 
    statement->incrementUseCount();
@@ -549,7 +549,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    unsigned long& rowsAffectedCount) {
-   if (NULL == m_db) {
+   if (nullptr == m_db) {
       rowsAffectedCount = 0L;
       ::printf("error: no database connection\n");
       return false;
@@ -564,8 +564,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    MarkInUse inUse(this);
 
    int rc = 0;
-   sqlite3_stmt* pStmt = NULL;
-   SQLiteStatement* cachedStmt = NULL;
+   sqlite3_stmt* pStmt = nullptr;
+   SQLiteStatement* cachedStmt = nullptr;
 
    if (m_traceExecution && !sql.empty()) {
       ::printf("executeUpdate: %s (%s)\n",
@@ -577,7 +577,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    if (cacheStatements) {
       cachedStmt = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
-      pStmt = cachedStmt ? cachedStmt->statement() : NULL;
+      pStmt = cachedStmt ? cachedStmt->statement() : nullptr;
    }
 
    int numberOfRetries = 0;
@@ -705,7 +705,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    const DBStatementArgs& args,
                                    unsigned long& affectedRowsCount) {
-   if (NULL == m_db) {
+   if (nullptr == m_db) {
       ::printf("error: no database connection\n");
       affectedRowsCount = 0L;
       return false;
@@ -720,8 +720,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    MarkInUse inuse(this);
 
    int rc = 0;
-   sqlite3_stmt* pStmt = NULL;
-   SQLiteStatement* cachedStmt = NULL;
+   sqlite3_stmt* pStmt = nullptr;
+   SQLiteStatement* cachedStmt = nullptr;
 
    const bool cacheStatements = shouldCacheStatements();
 
@@ -733,7 +733,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    if (cacheStatements) {
       cachedStmt = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
-      pStmt = cachedStmt ? cachedStmt->statement() : NULL;
+      pStmt = cachedStmt ? cachedStmt->statement() : nullptr;
    }
 
    int numberOfRetries = 0;
@@ -791,7 +791,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    for (; idx < argsCount; ++idx) {
       const DBAbstractDataType* arg = args[idx];
 
-      if (arg != NULL) {
+      if (arg != nullptr) {
          if (m_traceExecution) {
             ::printf("obj: %s (%s)\n",
                      arg->valueAsString().c_str(),
@@ -812,7 +812,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
                sql.c_str());
       ::sqlite3_finalize(pStmt);
-      if ((cachedStmt != NULL) && !cacheStatements) {
+      if ((cachedStmt != nullptr) && !cacheStatements) {
          delete cachedStmt;
       }
       affectedRowsCount = 0L;
@@ -869,7 +869,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
          cachedStmt->incrementUseCount();
       } else {
          delete cachedStmt;
-         cachedStmt = NULL;
+         cachedStmt = nullptr;
       }
    } else {
       /* Finalize the virtual machine. This releases all memory and other
@@ -1041,7 +1041,7 @@ SQLiteStatement::~SQLiteStatement() {
 void SQLiteStatement::close() {
    if (m_statement) {
       ::sqlite3_finalize(m_statement);
-      m_statement = NULL;
+      m_statement = nullptr;
    }
 }
 

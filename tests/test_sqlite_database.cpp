@@ -96,13 +96,13 @@ void TestSQLiteDatabase::test_sqliteHandle() {
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
    sqlite3* db_handle = db.sqliteHandle();
-   require(db_handle == NULL, "sqliteHandle must return NULL when DB closed");
+   require(db_handle == nullptr, "sqliteHandle must return nullptr when DB closed");
    require(db.open(), "open should succeed on valid path");
    db_handle = db.sqliteHandle();
-   require(db_handle != NULL, "sqliteHandle must return non-NULL when DB open");
+   require(db_handle != nullptr, "sqliteHandle must return non-nullptr when DB open");
    db.close();
    db_handle = db.sqliteHandle();
-   require(db_handle == NULL, "sqliteHandle must return NULL when DB closed");
+   require(db_handle == nullptr, "sqliteHandle must return nullptr when DB closed");
 }
 
 void TestSQLiteDatabase::test_open() {

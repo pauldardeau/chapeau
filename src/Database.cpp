@@ -172,7 +172,7 @@ DBStatement* Database::cachedStatementForQuery(const std::string& query) {
       return (*it).second;
    }
 
-   return NULL;
+   return nullptr;
 }
 
 //******************************************************************************
