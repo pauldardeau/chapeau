@@ -692,7 +692,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    bool sqlSuccess = (rc == SQLITE_OK);
 
    if (sqlSuccess) {
-      rowsAffectedCount = ::sqlite3_changes64(m_db);
+      rowsAffectedCount = ::sqlite3_changes(m_db);
    } else {
       rowsAffectedCount = 0L;
    }
@@ -881,7 +881,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    bool sqlSuccess = (rc == SQLITE_OK);
 
    if (sqlSuccess) {
-      affectedRowsCount = ::sqlite3_changes64(m_db);
+      affectedRowsCount = ::sqlite3_changes(m_db);
    } else {
       affectedRowsCount = 0L;
    }
