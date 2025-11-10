@@ -1,5 +1,5 @@
 CC = c++
-CC_OPTS = -c -I../src -I../../chaudiere/src -I../../poivre
+CC_OPTS = -c -std=c++20 -I../src -I../../chaudiere/src -I../../poivre
 
 EXE_NAME = test_chapeau
 LIB_NAMES = ../../poivre/poivre.so ../../chaudiere/src/libchaudiere.so -lsqlite3

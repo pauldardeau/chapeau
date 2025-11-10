@@ -4,7 +4,7 @@
 CC = cc
 CXX = c++
 CC_OPTS = -c -fPIC -Wall -O2
-CXX_OPTS = -c -Wall -fPIC -O2 -I/usr/local/include -I../../chaudiere/src
+CXX_OPTS = -c -Wall -std=c++20 -fPIC -O2 -I/usr/local/include -I../../chaudiere/src
 ARCHIVE_CMD = ar
 ARCHIVE_OPTS = rs
 
