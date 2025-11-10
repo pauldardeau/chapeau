@@ -1,8 +1,8 @@
 CC = c++
-CC_OPTS = -c -std=c++20 -I../src -I../../chaudiere/src -I../../poivre
+CC_OPTS = -c -std=c++20 -I../src -I../../chaudiere/src -I../../poivre -I/usr/local/include
 
 EXE_NAME = test_chapeau
-LIB_NAMES = ../../poivre/poivre.so ../../chaudiere/src/libchaudiere.so -lsqlite3
+LIB_NAMES = ../../poivre/poivre.so ../../chaudiere/src/libchaudiere.so -L/usr/local/lib -lsqlite3 -lpthread
 
 PROJ_OBJS = ../src/Database.o \
 ../src/DBDate.o \
