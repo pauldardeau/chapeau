@@ -19,8 +19,8 @@ int main(int argc, char** pszArgs)
 
    const char* dbFilePath = pszArgs[1];
    const char* dbQuery = pszArgs[2];
-  
-   SQLiteDatabase db(dbFilePath); 
+
+   SQLiteDatabase db(dbFilePath);
    if (db.open()) {
       DBResultSet* rs = db.executeQuery(dbQuery);
       if (rs != nullptr) {

@@ -14,7 +14,7 @@ class DBStatement;
  *
  */
 class DBAbstractDataType {
-   
+
 public:
    /**
     * Constructs an instance with a data type name
@@ -23,7 +23,7 @@ public:
    explicit DBAbstractDataType(std::string typeName) :
       m_typeName(typeName) {
    }
-   
+
    /**
     * Copy constructor
     * @param copy the source of the copy
@@ -31,12 +31,12 @@ public:
    DBAbstractDataType(const DBAbstractDataType& copy) :
       m_typeName(copy.m_typeName) {
    }
-   
+
    /**
     * Destructor
     */
    virtual ~DBAbstractDataType() {}
-   
+
    /**
     * Copy operator
     * @param copy the source of the copy
@@ -46,12 +46,12 @@ public:
       if (this == &copy) {
          return *this;
       }
-      
+
       m_typeName = copy.m_typeName;
-      
+
       return *this;
    }
-   
+
    /**
     * Retrieves the data type name
     * @return data type name
@@ -59,13 +59,13 @@ public:
    const std::string& typeName() const {
       return m_typeName;
    }
-   
+
    /**
     * Retrieves the value as a string
     * @return value as a string
     */
    virtual std::string valueAsString() const = 0;
-   
+
    /**
     * Binds the value to a database statement parameter
     * @param db the database connection

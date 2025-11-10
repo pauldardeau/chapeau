@@ -527,7 +527,7 @@ public:
    virtual void setQuery(const std::string& query);
 
    virtual int getColumnCount() const = 0;
-   
+
    virtual DBValueType getTypeForColumnIndex(int columnIndex) const = 0;
 };
 

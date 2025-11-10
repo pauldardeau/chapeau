@@ -13,47 +13,47 @@ class DBAbstractDataType;
  *
  */
 class DBStatementArgs {
-   
+
 public:
    /**
     *
     */
    DBStatementArgs();
-   
+
    /**
     * Destructor
     */
    virtual ~DBStatementArgs();
-   
+
    /**
     *
     */
    void clear();
-   
+
    /**
     *
     * @return
     */
    std::size_t size() const;
-   
+
    /**
     *
     * @return
     */
    bool empty() const;
-   
+
    /**
     *
     * @param arg
     */
    void add(DBAbstractDataType* arg);
-   
+
    /**
     *
     * @return
     */
    DBAbstractDataType* operator[](std::size_t pos);
-   
+
    /**
     *
     * @return
@@ -67,7 +67,7 @@ private:
    // no copies
    DBStatementArgs(const DBStatementArgs&);
    DBStatementArgs& operator=(const DBStatementArgs&);
-   
+
 };
 
 }
