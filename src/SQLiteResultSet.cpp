@@ -256,6 +256,41 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
 
 //******************************************************************************
 
+bool SQLiteResultSet::stringForColumn(const std::string& columnName,
+                                      std::string& columnValue) const {
+   if (!m_columnNamesSetup) {
+      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
+      pThis->setupColumnNames();
+   }
+
+   const int columnIdx = columnIndexForName(columnName);
+
+   if (columnIdx == -1) {
+      return stringForColumnIndex(columnIdx, columnValue);
+   } else {
+      columnValue = "";
+      return false;
+   }
+}
+
+//******************************************************************************
+
+bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
+                                           std::string& columnValue) const {
+   const char *c =
+      (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
+
+   if (c != nullptr) {
+      columnValue = c;
+      return true;
+   } else {
+      columnValue = "";
+      return false;
+   }
+}
+
+//******************************************************************************
+
 DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
       SQLiteResultSet* pThis = (SQLiteResultSet*) this;

@@ -149,6 +149,22 @@ public:
    /**
     *
     * @param columnName
+    * @param columnValue
+    * @return
+    */
+   bool stringForColumn(const std::string& columnName, std::string& columnValue) const;
+
+   /**
+    *
+    * @param columnIdx
+    * @param columnValue
+    * @return
+    */
+   bool stringForColumnIndex(int columnIdx, std::string& columnValue) const;
+
+   /**
+    *
+    * @param columnName
     * @return
     * @see DBDate()
     */
