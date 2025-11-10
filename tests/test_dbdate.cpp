@@ -63,7 +63,7 @@ void TestDBDate::test_constructor_with_string() {
    DBDate d(ts);
    // yyyy-mm-dd hh:mm:ss
    string ts_formatted = d.stringValue();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_copy_constructor() {
@@ -72,7 +72,7 @@ void TestDBDate::test_copy_constructor() {
    DBDate d1(ts);
    DBDate d2(d1);
    string ts_formatted = d2.stringValue();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_destructor() {
@@ -87,7 +87,7 @@ void TestDBDate::test_assignment_operator() {
    DBDate d2;
    d2 = d1;
    string ts_formatted = d2.stringValue();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_getDateTime() {
@@ -96,7 +96,7 @@ void TestDBDate::test_getDateTime() {
    DBDate d(ts);
    const DateTime& dt = d.getDateTime();
    string ts_formatted = dt.formattedString();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_timeIntervalSince1970() {
@@ -115,7 +115,7 @@ void TestDBDate::test_stringValue() {
    string ts = "20220922091633";
    DBDate d(ts);
    string ts_formatted = d.stringValue();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_valueAsString() {
@@ -123,7 +123,7 @@ void TestDBDate::test_valueAsString() {
    string ts = "20220922091633";
    DBDate d(ts);
    string ts_formatted = d.valueAsString();
-   requireStringEquals("2022-09-22 09:16:33", ts_formatted);
+   requireStringEquals("2022-09-22 09:16:33.000000", ts_formatted);
 }
 
 void TestDBDate::test_bind() {
