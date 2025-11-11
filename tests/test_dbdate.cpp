@@ -44,7 +44,7 @@ void TestDBDate::test_constructor_with_double() {
    DBDate d(dt_unix_time);
    double d_unix_time = d.timeIntervalSince1970();
    double delta = d_unix_time - dt_unix_time;
-   require(delta < 0.0001, "DBDate constructed with unix time should match DateTime"); 
+   require(delta < 0.0001, "DBDate constructed with unix time should match DateTime");
 }
 
 void TestDBDate::test_constructor_with_datetime() {

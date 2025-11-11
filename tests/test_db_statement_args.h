@@ -19,7 +19,7 @@ protected:
 
 public:
    TestDBStatementArgs();
-   
+
 };
 
 

@@ -147,7 +147,7 @@ void TestDBStatementArgs::test_const_operator_brackets() {
    args.add(db_null);
    require(args.size() == 8);
 
-   const DBStatementArgs& c_args = args;  
+   const DBStatementArgs& c_args = args;
 
    require(c_args[0] == db_int);
    require(c_args[1] == db_string);

@@ -68,7 +68,7 @@ void TestSQLiteDatabase::test_constructor() {
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
 }
- 
+
 void TestSQLiteDatabase::test_destructor() {
    TEST_CASE("test_destructor");
 }

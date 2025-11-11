@@ -21,7 +21,7 @@ protected:
 
 public:
    TestSQLiteStatement();
-   
+
 };
 
 
