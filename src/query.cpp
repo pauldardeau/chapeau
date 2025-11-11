@@ -31,8 +31,8 @@ int main(int argc, char** pszArgs)
                   printf(",");
                }
                DBValueType dbValueType = rs->getTypeForColumnIndex(i);
-	       if (dbValueType == ValueTypeInteger) {
-	          printf("%d", rs->intForColumnIndex(i));
+               if (dbValueType == ValueTypeInteger) {
+                  printf("%d", rs->intForColumnIndex(i));
                } else if (dbValueType == ValueTypeFloat) {
                   printf("%f", rs->doubleForColumnIndex(i));
                } else if (dbValueType == ValueTypeText) {
@@ -48,14 +48,14 @@ int main(int argc, char** pszArgs)
                } else {
                   printf("???");
                }
-	    }
-	    printf("\n");
+            }
+            printf("\n");
          }
-	 rs->close();
-	 delete rs;
+         rs->close();
+         delete rs;
       } else {
          printf("error: executeQuery returned null\n");
-	 exit(1);
+         exit(1);
       }
    } else {
       printf("error: unable to open database '%s'\n", dbFilePath);

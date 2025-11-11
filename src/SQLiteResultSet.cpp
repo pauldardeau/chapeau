@@ -388,7 +388,7 @@ DBValueType SQLiteResultSet::getTypeForColumnIndex(int columnIndex) const {
          break;
       default:
          dbValueType = ValueTypeUnknown;
-	 break;
+      break;
    }
 
    return dbValueType;
