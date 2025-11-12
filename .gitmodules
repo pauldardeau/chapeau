@@ -1,0 +1,3 @@
+[submodule "chaudiere"]
+	path = chaudiere
+	url = https://github.com/pauldardeau/chaudiere
