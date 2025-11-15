@@ -4,7 +4,7 @@
 
 namespace fs = std::filesystem;
 
-FSTestCase::FSTestCase(poivre::TestSuite& the_test_suite,
+FSTestCase::FSTestCase(chaudiere::TestSuite& the_test_suite,
                        const std::string& the_test_dir) :
    test_suite(the_test_suite),
    test_dir(the_test_dir) {

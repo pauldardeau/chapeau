@@ -4,7 +4,6 @@
 #include "OSUtils.h"
 
 using namespace std;
-using namespace poivre;
 using namespace chapeau;
 
 
