@@ -491,6 +491,20 @@ public:
     * @param columnName
     * @return
     */
+   virtual bool stringForColumn(const std::string& columnName, std::string& s) const = 0;
+
+   /**
+    *
+    * @param columnIdx
+    * @return
+    */
+   virtual bool stringForColumnIndex(int columnIdx, std::string& s) const = 0;
+
+   /**
+    *
+    * @param columnName
+    * @return
+    */
    virtual DBDate* dateForColumn(const std::string& columnName) const = 0;
 
    /**
