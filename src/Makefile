@@ -27,10 +27,10 @@ clean :
 	rm -f $(EXE_NAME)
 
 $(LIB_NAME) : $(LIB_OBJS)
-	$(CXX) -shared -fPIC $(LIB_OBJS) -o $(LIB_NAME) ../chaudiere/src/libchaudiere.so -L/usr/local/lib -lsqlite3
+	$(CXX) -shared -fPIC $(LIB_OBJS) -o $(LIB_NAME) -L../chaudiere/src -lchaudiere -L/usr/local/lib -lsqlite3
 
 $(EXE_NAME) : $(EXE_OBJS)
-	$(CXX) $(EXE_OBJS) -o $(EXE_NAME) ./libchapeau.so ../chaudiere/src/libchaudiere.so -L/usr/local/lib -lsqlite3 -lpthread
+	$(CXX) $(EXE_OBJS) -o $(EXE_NAME) -L. -lchapeau -L../chaudiere/src -lchaudiere -L/usr/local/lib -lsqlite3 -lpthread
 
 %.o : %.cpp
 	$(CXX) $(CXX_OPTS) $< -o $@
