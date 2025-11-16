@@ -681,15 +681,15 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    if (cachedStmt) {
       cachedStmt->incrementUseCount();
-      rc = ::sqlite3_reset(pStmt);
+      ::sqlite3_reset(pStmt);
    } else {
       /* Finalize the virtual machine. This releases all memory and other
        ** resources allocated by the sqlite3_prepare() call above.
        */
-      rc = ::sqlite3_finalize(pStmt);
+      ::sqlite3_finalize(pStmt);
    }
 
-   bool sqlSuccess = (rc == SQLITE_OK);
+   bool sqlSuccess = (rc == SQLITE_DONE);
 
    if (sqlSuccess) {
       rowsAffectedCount = ::sqlite3_changes(m_db);
@@ -864,7 +864,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    assert(rc != SQLITE_ROW);
 
    if (cachedStmt) {
-      rc = ::sqlite3_reset(pStmt);
+      ::sqlite3_reset(pStmt);
       if (cacheStatements) {
          cachedStmt->incrementUseCount();
       } else {
@@ -875,10 +875,10 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       /* Finalize the virtual machine. This releases all memory and other
        ** resources allocated by the sqlite3_prepare() call above.
        */
-      rc = ::sqlite3_finalize(pStmt);
+      ::sqlite3_finalize(pStmt);
    }
 
-   bool sqlSuccess = (rc == SQLITE_OK);
+   bool sqlSuccess = (rc == SQLITE_DONE);
 
    if (sqlSuccess) {
       affectedRowsCount = ::sqlite3_changes(m_db);
