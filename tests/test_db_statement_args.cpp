@@ -14,7 +14,7 @@ using namespace chapeau;
 
 
 TestDBStatementArgs::TestDBStatementArgs() :
-   TestSuite("TestDBStatementArgs") {
+   poivre::TestSuite("TestDBStatementArgs") {
 }
 
 void TestDBStatementArgs::runTests() {

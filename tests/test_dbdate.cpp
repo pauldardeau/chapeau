@@ -8,7 +8,7 @@ using namespace chaudiere;
 
 
 TestDBDate::TestDBDate() :
-   TestSuite("TestDBDate") {
+   poivre::TestSuite("TestDBDate") {
 }
 
 void TestDBDate::runTests() {

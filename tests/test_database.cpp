@@ -3,7 +3,7 @@
 
 
 TestDatabase::TestDatabase() :
-   TestSuite("TestDatabase") {
+   poivre::TestSuite("TestDatabase") {
 }
 
 void TestDatabase::runTests() {

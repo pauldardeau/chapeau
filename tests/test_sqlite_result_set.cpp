@@ -2,7 +2,7 @@
 #include "SQLiteResultSet.h"
 
 TestSQLiteResultSet::TestSQLiteResultSet() :
-   TestSuite("TestSQLiteResultSet") {
+   poivre::TestSuite("TestSQLiteResultSet") {
 }
 
 void TestSQLiteResultSet::runTests() {

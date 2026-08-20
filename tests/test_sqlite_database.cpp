@@ -8,7 +8,7 @@ using namespace chapeau;
 
 
 TestSQLiteDatabase::TestSQLiteDatabase() :
-   TestSuite("TestSQLiteDatabase") {
+   poivre::TestSuite("TestSQLiteDatabase") {
 }
 
 void TestSQLiteDatabase::runTests() {

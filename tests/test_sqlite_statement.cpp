@@ -2,7 +2,7 @@
 #include "SQLiteDatabase.h"
 
 TestSQLiteStatement::TestSQLiteStatement() :
-   TestSuite("TestSQLiteStatement") {
+   poivre::TestSuite("TestSQLiteStatement") {
 }
 
 void TestSQLiteStatement::runTests() {

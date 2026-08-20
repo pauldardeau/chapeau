@@ -4,7 +4,7 @@
 #include "TestSuite.h"
 
 
-class TestDBStatementArgs : public chaudiere::TestSuite {
+class TestDBStatementArgs : public poivre::TestSuite {
 protected:
    void runTests();
 
