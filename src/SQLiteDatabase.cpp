@@ -503,12 +503,10 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
    const size_t argCount = args.size();
 
-   if (!statement) {
-      statement = new SQLiteStatement(pStmt, cacheStatements);
+   const bool isNewlyCreatedStatement = !statement;
 
-      if (cacheStatements) {
-         setCachedStatement(statement, sql);
-      }
+   if (isNewlyCreatedStatement) {
+      statement = new SQLiteStatement(pStmt, cacheStatements);
    }
 
    size_t idx = 0;
@@ -535,8 +533,22 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    if (idx != queryCount) {
       Logger::error("the bind count is not correct for the # of variables (executeQuery)");
-      ::sqlite3_finalize(pStmt);
+
+      // only tear down a statement created for this call -- one reused
+      // from the cache is still valid and may be in use elsewhere, so it
+      // must not be finalized/deleted here
+      if (isNewlyCreatedStatement) {
+         delete statement;
+      }
+
       return nullptr;
+   }
+
+   // deferred until after the bind-count check succeeds, so a mismatched
+   // call never leaves a cache entry pointing at an already-finalized
+   // statement
+   if (isNewlyCreatedStatement && cacheStatements) {
+      setCachedStatement(statement, sql);
    }
 
    statement->incrementUseCount();
@@ -778,12 +790,10 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
    const size_t argsCount = args.size();
 
-   if (!cachedStmt) {
-      cachedStmt = new SQLiteStatement(pStmt, cacheStatements);
+   const bool isNewlyCreatedStatement = !cachedStmt;
 
-      if (cacheStatements) {
-         setCachedStatement(cachedStmt, sql);
-      }
+   if (isNewlyCreatedStatement) {
+      cachedStmt = new SQLiteStatement(pStmt, cacheStatements);
    }
 
    size_t idx = 0;
@@ -811,12 +821,24 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    if (idx != queryCount) {
       ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
                sql.c_str());
-      ::sqlite3_finalize(pStmt);
-      if ((cachedStmt != nullptr) && !cacheStatements) {
+
+      // only tear down a statement created for this call -- one reused
+      // from the cache is still valid and may be in use elsewhere, so it
+      // must not be finalized/deleted here
+      if (isNewlyCreatedStatement) {
          delete cachedStmt;
+         cachedStmt = nullptr;
       }
+
       affectedRowsCount = 0L;
       return false;
+   }
+
+   // deferred until after the bind-count check succeeds, so a mismatched
+   // call never leaves a cache entry pointing at an already-finalized
+   // statement
+   if (isNewlyCreatedStatement && cacheStatements) {
+      setCachedStatement(cachedStmt, sql);
    }
 
    /* Call sqlite3_step() to run the virtual machine. Since the SQL being

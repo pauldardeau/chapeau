@@ -266,10 +266,10 @@ bool SQLiteResultSet::stringForColumn(const std::string& columnName,
    const int columnIdx = columnIndexForName(columnName);
 
    if (columnIdx == -1) {
-      return stringForColumnIndex(columnIdx, columnValue);
-   } else {
       columnValue = "";
       return false;
+   } else {
+      return stringForColumnIndex(columnIdx, columnValue);
    }
 }
 
