@@ -46,7 +46,7 @@ void SQLiteResultSet::close() {
 
 //******************************************************************************
 
-void SQLiteResultSet::setupColumnNames() {
+void SQLiteResultSet::setupColumnNames() const {
    if (!m_columnNameToIndexMap.empty()) {
       m_columnNameToIndexMap.erase(m_columnNameToIndexMap.begin(),
                                    m_columnNameToIndexMap.end());
@@ -122,8 +122,7 @@ bool SQLiteResultSet::next() {
 
 int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    std::string lowerColumnName = columnName;
@@ -147,8 +146,7 @@ int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
 
 int SQLiteResultSet::intForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -170,8 +168,7 @@ int SQLiteResultSet::intForColumnIndex(int columnIdx) const {
 
 long SQLiteResultSet::longForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -205,8 +202,7 @@ bool SQLiteResultSet::boolForColumnIndex(int columnIdx) const {
 
 double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -241,8 +237,7 @@ std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
 
 std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -259,8 +254,7 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
 bool SQLiteResultSet::stringForColumn(const std::string& columnName,
                                       std::string& columnValue) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -293,8 +287,7 @@ bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
 
 DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);
@@ -316,8 +309,7 @@ DBDate* SQLiteResultSet::dateForColumnIndex(int columnIdx) const {
 
 DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
-      SQLiteResultSet* pThis = (SQLiteResultSet*) this;
-      pThis->setupColumnNames();
+      setupColumnNames();
    }
 
    const int columnIdx = columnIndexForName(columnName);

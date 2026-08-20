@@ -203,14 +203,14 @@ protected:
    /**
     *
     */
-   void setupColumnNames();
+   void setupColumnNames() const;
 
 
 private:
    SQLiteDatabase* m_parentDB;
    SQLiteStatement* m_statement;
-   std::map<std::string, int> m_columnNameToIndexMap;
-   bool m_columnNamesSetup;
+   mutable std::map<std::string, int> m_columnNameToIndexMap;
+   mutable bool m_columnNamesSetup;
 
    SQLiteResultSet();
    SQLiteResultSet(const SQLiteResultSet&);
