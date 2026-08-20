@@ -51,6 +51,9 @@ public:
    }
 
    const void* value() const {
+      if (m_buffer.empty()) {
+         return nullptr;
+      }
       return (const void*) &m_buffer[0];
    }
 
