@@ -2,3 +2,6 @@
 *.so
 src/query
 tests/test_chapeau
+
+# CMake out-of-source build directory
+/build/

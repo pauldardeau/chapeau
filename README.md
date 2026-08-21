@@ -60,9 +60,37 @@ make -C src    # builds libchapeau.so (and the query demo executable)
 make -C tests  # builds test_chapeau (needs the poivre submodule)
 ```
 
+Build `src/` without `-j`/parallel make - `query`'s link step isn't currently declared to
+depend on `libchapeau.so` finishing first, so a parallel build can race and fail to find it
+(serial `make` always gets the ordering right).
+
 Your own programs need `-I` for `src/` and `chaudiere/src/`, and link
 against `src/libchapeau.so`, `chaudiere/src/libchaudiere.so`, and
 `-lsqlite3` (see `src/Makefile` and `tests/Makefile` for the exact flags).
+
+### Building with CMake
+
+A `CMakeLists.txt` is also provided (and doesn't have the `-j` caveat above - CMake always
+gets target ordering right regardless of parallelism):
+
+```bash
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure   # builds and runs test_chapeau
+```
+
+To depend on chapeau from another CMake project - vendored as a git submodule:
+
+```cmake
+add_subdirectory(chapeau)
+target_link_libraries(my_target PRIVATE chapeau)
+```
+
+No `-I` needed - the include directory, chaudière and SQLite3 (both linked transitively),
+and C++20 all propagate automatically (SQLite3 is located via CMake's built-in `FindSQLite3`
+module rather than a hardcoded `-L/usr/local/lib`, so this also works with SQLite installed
+from a system package, pkg-config, or vcpkg). The Makefile isn't going anywhere; both build
+systems compile the same sources.
 
 Groups of Functionality
 ------------------------
