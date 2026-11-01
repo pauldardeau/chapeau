@@ -19,6 +19,7 @@ test_database.o \
 test_dbdate.o \
 test_db_statement_args.o \
 test_sqlite_database.o \
+test_sqlite_foundation.o \
 test_sqlite_result_set.o \
 test_sqlite_statement.o \
 tests.o \

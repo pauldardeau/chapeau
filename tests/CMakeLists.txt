@@ -7,6 +7,7 @@ add_executable(test_chapeau
    test_dbdate.cpp
    test_db_statement_args.cpp
    test_sqlite_database.cpp
+   test_sqlite_foundation.cpp
    test_sqlite_result_set.cpp
    test_sqlite_statement.cpp
    tests.cpp
@@ -21,3 +22,7 @@ add_test(
    COMMAND test_chapeau
    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# subprocess regression harness: crash/hang/sanitizer-aware cases, and the
+# known-defect reproductions (opt-in, see regression/CMakeLists.txt)
+add_subdirectory(regression)
