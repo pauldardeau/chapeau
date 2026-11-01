@@ -110,6 +110,11 @@ void TestSQLiteFoundation::runTests() {
    test_cursor_exhaustion_is_terminal();
    test_cache_disabled_with_several_active_cursors();
    test_update_while_cursor_owns_same_sql();
+   test_schema_change_query();
+   test_schema_change_update();
+   test_schema_change_repeated();
+   test_schema_change_then_constraint_error();
+   test_schema_change_with_independent_cursors();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -1627,5 +1632,280 @@ void TestSQLiteFoundation::test_update_while_cursor_owns_same_sql() {
 
    // one row per execution: the update, the cursor, the update again
    requireLongEquals(3, scalar(db, "select count(*) from log"), "three rows stored");
+   db.close();
+}
+
+// ---- schema changes under cached prepared statements (CH-06) ---------------
+
+namespace {
+
+// "select name from items where id = ?" -- the same SQL text every time, so
+// with caching on it is one cached statement that outlives schema changes
+string nameForId(SQLiteDatabase& db, long id) {
+   DBStatementArgs args;
+   args.add(new DBLong(id));
+   unique_ptr<SQLiteResultSet> rs(
+      openCursor(db, "select name from items where id = ?", args));
+   if (rs && rs->next()) {
+      return firstText(*rs);
+   }
+   return "<no row>";
+}
+
+// "update items set qty = ? where id = ?"; returns the rows it reports
+// affecting, or -1 if the update failed
+long long setQty(SQLiteDatabase& db, long qty, long id) {
+   DBStatementArgs args;
+   args.add(new DBLong(qty));
+   args.add(new DBLong(id));
+   unsigned long rowsAffected = 0;
+   if (!db.executeUpdate("update items set qty = ? where id = ?", args, rowsAffected)) {
+      return -1;
+   }
+   return static_cast<long long>(rowsAffected);
+}
+
+// the column count of "select * from items where id = ?"
+int starColumnCount(SQLiteDatabase& db, long id) {
+   DBStatementArgs args;
+   args.add(new DBLong(id));
+   unique_ptr<SQLiteResultSet> rs(
+      openCursor(db, "select * from items where id = ?", args));
+   return (rs && rs->next()) ? rs->getColumnCount() : -1;
+}
+
+}
+
+void TestSQLiteFoundation::test_schema_change_query() {
+   TEST_CASE("test_schema_change_query");
+   chapeau_tests::ScopedTempDir dir;
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      SQLiteDatabase db(dir.file("schema_query" + to_string(pass) + ".sqlite3"));
+      db.setLogsErrors(false);
+      require(db.open(), when + ": open");
+      require(createItems(db), when + ": create and fill the items table");
+      db.setShouldCacheStatements(pass == 0);
+
+      requireStringEquals("banana", nameForId(db, 2), when + ": before any schema change");
+      requireLongEquals(4, starColumnCount(db, 2), when + ": select * sees four columns");
+
+      // ALTER TABLE ADD COLUMN
+      require(exec(db, "alter table items add column extra integer"), when + ": alter table");
+      requireStringEquals("banana", nameForId(db, 2), when + ": after ALTER TABLE");
+      requireStringEquals("cherry", nameForId(db, 3), when + ": another parameter after ALTER TABLE");
+      requireStringEquals("apple", nameForId(db, 1), when + ": and another");
+      requireLongEquals(5, starColumnCount(db, 2),
+                        when + ": the same select * now sees the new column");
+
+      // CREATE INDEX, then DROP INDEX
+      require(exec(db, "create index ix_items_name on items(name)"), when + ": create index");
+      requireStringEquals("banana", nameForId(db, 2), when + ": after CREATE INDEX");
+      require(exec(db, "drop index ix_items_name"), when + ": drop index");
+      requireStringEquals("cherry", nameForId(db, 3), when + ": after DROP INDEX");
+
+      // a value stored through the new column is read through the cached statement
+      require(exec(db, "update items set extra = 77 where id = 2"), when + ": set the new column");
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(2));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select * from items where id = ?", args));
+         require(rs && rs->next(), when + ": row 2 through select *");
+         if (rs) {
+            requireLongEquals(77, rs->longForColumn("extra"), when + ": the new column's value");
+            requireLongEquals(12, rs->longForColumn("qty"), when + ": an old column's value");
+         }
+      }
+      db.close();
+   }
+}
+
+void TestSQLiteFoundation::test_schema_change_update() {
+   TEST_CASE("test_schema_change_update");
+   chapeau_tests::ScopedTempDir dir;
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      SQLiteDatabase db(dir.file("schema_update" + to_string(pass) + ".sqlite3"));
+      db.setLogsErrors(false);
+      require(db.open(), when + ": open");
+      require(createItems(db), when + ": create and fill the items table");
+      db.setShouldCacheStatements(pass == 0);
+
+      requireLongEquals(1, setQty(db, 100, 1), when + ": update before any schema change");
+      requireLongEquals(100, scalar(db, "select qty from items where id = 1"), when + ": qty 100");
+
+      require(exec(db, "alter table items add column extra integer"), when + ": alter table");
+      requireLongEquals(1, setQty(db, 101, 1), when + ": the same update after ALTER TABLE");
+      requireLongEquals(101, scalar(db, "select qty from items where id = 1"), when + ": qty 101");
+      requireLongEquals(1, setQty(db, 102, 1), when + ": and once more");
+      requireLongEquals(102, scalar(db, "select qty from items where id = 1"), when + ": qty 102");
+
+      require(exec(db, "create index ix_items_qty on items(qty)"), when + ": create index");
+      requireLongEquals(1, setQty(db, 103, 3), when + ": the same update after CREATE INDEX");
+      requireLongEquals(103, scalar(db, "select qty from items where id = 3"), when + ": qty of row 3");
+      requireLongEquals(0, setQty(db, 5, 999), when + ": an update matching nothing reports 0 rows");
+
+      // an insert statement across a schema change keeps working, with the new column NULL
+      for (int i = 0; i < 2; ++i) {
+         if (i == 1) {
+            require(exec(db, "alter table items add column more text"), when + ": a second alter table");
+         }
+         DBStatementArgs args;
+         args.add(new DBLong(20 + i));
+         args.add(new DBString("added" + to_string(i)));
+         unsigned long rowsAffected = 0;
+         require(db.executeUpdate("insert into items(id,name) values (?,?)", args, rowsAffected),
+                 when + ": the same insert, round " + to_string(i));
+         requireLongEquals(1, rowsAffected, when + ": one row inserted");
+      }
+      requireLongEquals(5, scalar(db, "select count(*) from items"), when + ": five rows");
+      requireLongEquals(2, scalar(db, "select count(*) from items where id >= 20 and extra is null"),
+                        when + ": the added rows have the new column NULL");
+
+      // the no-argument overloads: the same literal SQL across schema changes
+      const string bump = "update items set qty = qty + 1 where id = 2";
+      const string countSql = "select count(*) from items";
+      require(exec(db, bump), when + ": literal update before a schema change");
+      requireLongEquals(5, scalar(db, countSql), when + ": literal query before a schema change");
+      require(exec(db, "alter table items add column more2 integer"), when + ": alter table again");
+      require(exec(db, bump), when + ": the same literal update after ALTER TABLE");
+      requireLongEquals(5, scalar(db, countSql), when + ": the same literal query after ALTER TABLE");
+      require(exec(db, "create index ix_items_more2 on items(more2)"), when + ": create index");
+      require(exec(db, bump), when + ": the same literal update after CREATE INDEX");
+      requireLongEquals(12 + 3, scalar(db, "select qty from items where id = 2"),
+                        when + ": the literal update ran three times");
+      db.close();
+   }
+}
+
+void TestSQLiteFoundation::test_schema_change_repeated() {
+   TEST_CASE("test_schema_change_repeated");
+   chapeau_tests::ScopedTempDir dir;
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      SQLiteDatabase db(dir.file("schema_repeat" + to_string(pass) + ".sqlite3"));
+      db.setLogsErrors(false);
+      require(db.open(), when + ": open");
+      require(createItems(db), when + ": create and fill the items table");
+      db.setShouldCacheStatements(pass == 0);
+
+      for (int round = 1; round <= 6; ++round) {
+         const string label = when + ", round " + to_string(round);
+         require(exec(db, "alter table items add column c" + to_string(round) + " integer"),
+                 label + ": add a column");
+         require(exec(db, "create index ix_round_" + to_string(round) + " on items(name, qty)"),
+                 label + ": create an index");
+         if (round > 1) {
+            require(exec(db, "drop index ix_round_" + to_string(round - 1)),
+                    label + ": drop the previous index");
+         }
+
+         requireStringEquals("banana", nameForId(db, 2), label + ": cached query");
+         requireStringEquals("cherry", nameForId(db, 3), label + ": cached query, other parameter");
+         requireLongEquals(1, setQty(db, 1000 + round, 2), label + ": cached update");
+         requireLongEquals(1000 + round, scalar(db, "select qty from items where id = 2"),
+                           label + ": the update took effect");
+         requireLongEquals(4 + round, starColumnCount(db, 1),
+                           label + ": select * follows the columns");
+      }
+      db.close();
+   }
+}
+
+void TestSQLiteFoundation::test_schema_change_then_constraint_error() {
+   TEST_CASE("test_schema_change_then_constraint_error");
+   chapeau_tests::ScopedTempDir dir;
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      SQLiteDatabase db(dir.file("schema_constraint" + to_string(pass) + ".sqlite3"));
+      db.setLogsErrors(false);
+      require(db.open(), when + ": open");
+      require(createItems(db), when + ": create and fill the items table");
+      db.setShouldCacheStatements(pass == 0);
+
+      const char* const insertSql = "insert into items(id,name) values (?,?)";
+      unsigned long rowsAffected = 0;
+      const auto insert = [&](long id, const string& name) {
+         DBStatementArgs args;
+         args.add(new DBLong(id));
+         args.add(new DBString(name));
+         return db.executeUpdate(insertSql, args, rowsAffected);
+      };
+
+      require(insert(10, "ten"), when + ": insert before");
+      require(!insert(10, "again"), when + ": duplicate key refused");
+      requireLongEquals(SQLITE_CONSTRAINT, db.lastErrorCode() & 0xff,
+                        when + ": and reported as a constraint error");
+
+      require(exec(db, "alter table items add column extra integer"), when + ": alter table");
+
+      // after the schema change the same statement still reports the real error ...
+      require(!insert(10, "again"), when + ": duplicate key still refused after ALTER TABLE");
+      requireLongEquals(SQLITE_CONSTRAINT, db.lastErrorCode() & 0xff,
+                        when + ": as a constraint error, not as a schema error");
+      // ... and still inserts when the data is valid
+      require(insert(11, "eleven"), when + ": a valid insert after the refused one");
+      requireLongEquals(1, rowsAffected, when + ": one row");
+
+      require(exec(db, "create index ix_items_name on items(name)"), when + ": create index");
+      require(!insert(11, "dup"), when + ": duplicate refused after CREATE INDEX");
+      require(insert(12, "twelve"), when + ": valid insert recovers");
+
+      requireLongEquals(3 + 3, scalar(db, "select count(*) from items"),
+                        when + ": exactly the three valid inserts were stored");
+      requireStringEquals("eleven", nameForId(db, 11), when + ": a stored row reads back");
+      db.close();
+   }
+}
+
+void TestSQLiteFoundation::test_schema_change_with_independent_cursors() {
+   TEST_CASE("test_schema_change_with_independent_cursors");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("schema_cursors.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   const char* const sql = "select name from items where id >= ? order by id";
+
+   // warm the cached statement, change the schema, then run two cursors at once
+   for (int round = 0; round < 3; ++round) {
+      const string label = "round " + to_string(round);
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(1));
+         unique_ptr<SQLiteResultSet> warm(openCursor(db, sql, args));
+         require(warm && warm->next(), label + ": warm-up");
+      }
+      require(exec(db, "alter table items add column x" + to_string(round) + " integer"),
+              label + ": alter table");
+
+      DBStatementArgs from1;
+      from1.add(new DBLong(1));
+      DBStatementArgs from3;
+      from3.add(new DBLong(3));
+      unique_ptr<SQLiteResultSet> r1(openCursor(db, sql, from1));
+      unique_ptr<SQLiteResultSet> r2(openCursor(db, sql, from3));
+      require(r1 && r2, label + ": two cursors after the schema change");
+      if (r1 && r2) {
+         require(r1->next(), label + ": r1 row 1");
+         requireStringEquals("apple", firstText(*r1), label + ": r1 first row");
+         require(r2->next(), label + ": r2 row 1");
+         requireStringEquals("cherry", firstText(*r2), label + ": r2 sees only id >= 3");
+         require(r1->next(), label + ": r1 row 2");
+         requireStringEquals("banana", firstText(*r1), label + ": r1 second row");
+         require(!r2->next(), label + ": r2 ends");
+         require(r1->next(), label + ": r1 row 3");
+         requireStringEquals("cherry", firstText(*r1), label + ": r1 third row");
+         require(!r1->next(), label + ": r1 ends");
+      }
+   }
+   requireLongEquals(1, scalar(db, "select count(*) from pragma_table_info('items') where name = 'x2'"),
+                     "the schema really changed three times");
    db.close();
 }

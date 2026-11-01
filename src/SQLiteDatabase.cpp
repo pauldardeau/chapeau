@@ -547,7 +547,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    if (!pStmt) {
       do {
          retry = false;
-         rc = ::sqlite3_prepare(m_db, sql.c_str(), -1, &pStmt, 0);
+         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
 
          if (SQLITE_BUSY == rc) {
             retry = true;
@@ -687,7 +687,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    if (!pStmt) {
       do {
          retry = false;
-         rc = ::sqlite3_prepare(m_db, sql.c_str(), -1, &pStmt, 0);
+         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
          if (SQLITE_BUSY == rc) {
             retry = true;
             usleep(20);
@@ -790,7 +790,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       ::sqlite3_reset(pStmt);
    } else {
       /* Finalize the virtual machine. This releases all memory and other
-       ** resources allocated by the sqlite3_prepare() call above.
+       ** resources allocated by the sqlite3_prepare_v2() call above.
        */
       ::sqlite3_finalize(pStmt);
    }
@@ -854,7 +854,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    if (!pStmt) {
       do {
          retry = false;
-         rc = ::sqlite3_prepare(m_db, sql.c_str(), -1, &pStmt, 0);
+         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
          if (SQLITE_BUSY == rc) {
             retry = true;
             usleep(20);
@@ -1001,7 +1001,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       }
    } else {
       /* Finalize the virtual machine. This releases all memory and other
-       ** resources allocated by the sqlite3_prepare() call above.
+       ** resources allocated by the sqlite3_prepare_v2() call above.
        */
       ::sqlite3_finalize(pStmt);
    }

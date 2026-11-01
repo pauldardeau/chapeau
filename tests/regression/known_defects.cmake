@@ -21,8 +21,6 @@
 # today (no assertion); once the API exists, add a real check and a table line.
 
 set(CHAPEAU_DEFECT_TABLE
-   "CH-06|ch06_schema_change_cached_update|60|cached update statement fails permanently after a schema change"
-   "CH-06|ch06_schema_change_cached_query|60|cached query statement fails permanently after a schema change"
    "CH-07|ch07_busy_prepare_hang|10|executeQuery() retries forever on a busy database (busy limit 0)"
    "CH-07|ch07_busy_next_hang|10|next() retries forever on a busy database"
    "CH-07|ch07_begin_blocked_by_open_cursor|10|beginTransaction() retries forever while a cursor is open elsewhere"
@@ -39,6 +37,8 @@ set(CHAPEAU_FIXED_TABLE
    "CH-04|ch04_two_cursors_same_sql_independent|60|two live cursors over the same SQL share one statement"
    "CH-05|ch05_next_after_end_cached|60|next() after the end restarts the query (cached)"
    "CH-05|ch05_next_after_end_uncached|60|next() after the end dereferences a null statement (uncached)"
+   "CH-06|ch06_schema_change_cached_update|60|cached update statement fails permanently after a schema change"
+   "CH-06|ch06_schema_change_cached_query|60|cached query statement fails permanently after a schema change"
    # fixed as a consequence of the CH-01 ownership change (close() and the
    # destructor now invalidate live result sets and finalize their statements);
    # the busy-wait loops themselves (CH-07 proper) are unchanged
