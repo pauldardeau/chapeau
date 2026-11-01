@@ -35,9 +35,13 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   `regression_control_*` cases — behaviour that works today, run in isolated
   processes. Labels `harness` and `regression`.
 * **Known defects** (`ch<nn>_*` in `chapeau_probe.cpp`, listed in
-  `known_defects.cmake`): reproductions of the H1a defects CH-01 … CH-07. Each
-  asserts what a *fixed* Chapeau does, so each fails today. They are **not** in
-  the default set and are not part of normal CI. Enable them with
+  `CHAPEAU_DEFECT_TABLE` in `known_defects.cmake`): reproductions of the H1a
+  defects that are not fixed yet (CH-03 … CH-07). Scenarios whose defect has been
+  fixed (CH-01, CH-02, and the two CH-07 cases that were the same lifetime
+  problem) are in `CHAPEAU_FIXED_TABLE` and run in the default set as
+  `regression_ch…` cases. Each unfixed scenario asserts what a *fixed* Chapeau
+  does, so it fails today; these are **not** in the default set and not part of
+  normal CI. Enable them with
   `-DCHAPEAU_KNOWN_DEFECTS=ON` (label `known-defect`):
 
   ```bash

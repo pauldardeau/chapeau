@@ -384,6 +384,16 @@ public:
    */
    virtual bool goodConnection() = 0;
 
+protected:
+   /**
+    * Called by clearCachedStatements() for each statement removed from the
+    * cache. The default closes and deletes it; a subclass whose statements
+    * can still be in use (by a live result set) overrides this to keep such
+    * a statement alive until its last user is done with it.
+    * @param statement a statement that is no longer in the cache
+    */
+   virtual void discardCachedStatement(DBStatement* statement);
+
 private:
    std::map<std::string, DBStatement*> m_cachedStatements;
    bool m_shouldCacheStatements;

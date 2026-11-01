@@ -58,7 +58,7 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
 //******************************************************************************
 
 SQLiteDatabase::~SQLiteDatabase() {
-   clearCachedStatements();
+   // close() invalidates the live result sets, then empties the cache
    close();
 }
 
@@ -96,7 +96,48 @@ bool SQLiteDatabase::open() {
 
 //******************************************************************************
 
+void SQLiteDatabase::registerCursor(SQLiteResultSet* resultSet) {
+   m_cursors.insert(resultSet);
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::unregisterCursor(SQLiteResultSet* resultSet) {
+   m_cursors.erase(resultSet);
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::invalidateCursors() {
+   // invalidate() must not touch m_cursors, so work on a private copy
+   std::set<SQLiteResultSet*> live;
+   live.swap(m_cursors);
+
+   for (SQLiteResultSet* resultSet : live) {
+      resultSet->invalidate();
+   }
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::discardCachedStatement(DBStatement* statement) {
+   SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
+
+   if (stmt != nullptr && stmt->cursorCount() > 0) {
+      // a live result set is still using it: it is no longer the cache's,
+      // so the last of those result sets deletes it
+      stmt->setCached(false);
+   } else {
+      Database::discardCachedStatement(statement);
+   }
+}
+
+//******************************************************************************
+
 void SQLiteDatabase::close() {
+   // live result sets give up their statements first, so that every
+   // statement can be finalized and the connection actually closes
+   invalidateCursors();
    clearCachedStatements();
 
    if (!m_db) {
@@ -208,7 +249,7 @@ bool SQLiteDatabase::bindData(const DBData* data, int idx, DBStatement* statemen
                         idx,
                         data->value(),
                         (int) data->length(),
-                        SQLITE_STATIC);
+                        SQLITE_TRANSIENT);
       if (rc == SQLITE_OK) {
          bindSuccess = true;
       }
@@ -325,7 +366,7 @@ bool SQLiteDatabase::bindString(const std::string& value,
                         idx,
                         value.c_str(),
                         value.length(),
-                        SQLITE_STATIC);
+                        SQLITE_TRANSIENT);
       if (rc == SQLITE_OK) {
          bindSuccess = true;
       } else {
@@ -1049,7 +1090,8 @@ void SQLiteDatabase::setBusyRetryTimeout(int busyRetryTimeout) {
 SQLiteStatement::SQLiteStatement(sqlite3_stmt* value, bool isCached) :
    m_statement(value),
    m_useCount(0L),
-   m_isCached(isCached) {
+   m_isCached(isCached),
+   m_cursorCount(0) {
 }
 
 //******************************************************************************
@@ -1109,6 +1151,33 @@ void SQLiteStatement::incrementUseCount() {
 
 bool SQLiteStatement::isCached() const {
    return m_isCached;
+}
+
+//******************************************************************************
+
+void SQLiteStatement::setCached(bool value) {
+   m_isCached = value;
+}
+
+//******************************************************************************
+
+int SQLiteStatement::cursorCount() const {
+   return m_cursorCount;
+}
+
+//******************************************************************************
+
+void SQLiteStatement::attachCursor() {
+   ++m_cursorCount;
+}
+
+//******************************************************************************
+
+int SQLiteStatement::detachCursor() {
+   if (m_cursorCount > 0) {
+      --m_cursorCount;
+   }
+   return m_cursorCount;
 }
 
 //******************************************************************************

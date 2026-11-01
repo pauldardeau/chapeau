@@ -23,6 +23,9 @@ add_test(
    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# a hang in a test must not hold CI for the default 25 minutes
+set_tests_properties(test_chapeau PROPERTIES TIMEOUT 300)
+
 # subprocess regression harness: crash/hang/sanitizer-aware cases, and the
 # known-defect reproductions (opt-in, see regression/CMakeLists.txt)
 add_subdirectory(regression)

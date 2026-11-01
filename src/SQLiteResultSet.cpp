@@ -19,14 +19,42 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
                                  const std::string& query) :
    m_parentDB(db),
    m_statement(statement),
-   m_columnNamesSetup(false) {
+   m_columnNamesSetup(false),
+   m_invalidated(false) {
    setQuery(query);
+
+   if (m_statement != nullptr) {
+      m_statement->attachCursor();
+   }
+   if (m_parentDB != nullptr) {
+      m_parentDB->registerCursor(this);
+   }
 }
 
 //******************************************************************************
 
 SQLiteResultSet::~SQLiteResultSet() {
    close();
+   releaseStatement();
+
+   if (m_parentDB != nullptr) {
+      m_parentDB->unregisterCursor(this);
+      m_parentDB = nullptr;
+   }
+}
+
+//******************************************************************************
+
+void SQLiteResultSet::releaseStatement() {
+   SQLiteStatement* statement = m_statement;
+   m_statement = nullptr;
+
+   if (statement != nullptr) {
+      // the last user deletes a statement that the cache does not own
+      if (statement->detachCursor() == 0 && !statement->isCached()) {
+         delete statement;
+      }
+   }
 }
 
 //******************************************************************************
@@ -35,13 +63,33 @@ void SQLiteResultSet::close() {
    if (m_statement != nullptr) {
       m_statement->reset();
       if (!m_statement->isCached()) {
-         delete m_statement;
-         m_statement = nullptr;
+         releaseStatement();
       }
    }
    if (m_parentDB != nullptr) {
       m_parentDB->setInUse(false);
    }
+}
+
+//******************************************************************************
+
+void SQLiteResultSet::invalidate() {
+   // the database is closing or being destroyed: it has already taken this
+   // result set out of its own list, and must not be called back
+   if (m_statement != nullptr) {
+      m_statement->reset();
+      releaseStatement();
+   }
+   m_parentDB = nullptr;
+   m_invalidated = true;
+   m_columnNameToIndexMap.clear();
+   m_columnNamesSetup = false;
+}
+
+//******************************************************************************
+
+sqlite3_stmt* SQLiteResultSet::sqliteStatement() const {
+   return (m_statement != nullptr) ? m_statement->statement() : nullptr;
 }
 
 //******************************************************************************
@@ -52,11 +100,16 @@ void SQLiteResultSet::setupColumnNames() const {
                                    m_columnNameToIndexMap.end());
    }
 
-   const int columnCount = sqlite3_column_count(m_statement->statement());
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      // invalid result set: there are no columns to name
+      return;
+   }
+
+   const int columnCount = sqlite3_column_count(stmt);
 
    for (int columnIdx = 0; columnIdx < columnCount; ++columnIdx) {
-      std::string columnName =
-         sqlite3_column_name(m_statement->statement(), columnIdx);
+      std::string columnName = sqlite3_column_name(stmt, columnIdx);
       StrUtils::toLowerCase(columnName);
       m_columnNameToIndexMap[columnName] = columnIdx;
    }
@@ -67,6 +120,11 @@ void SQLiteResultSet::setupColumnNames() const {
 //******************************************************************************
 
 bool SQLiteResultSet::next() {
+   if (m_invalidated) {
+      // the database was closed or destroyed: no statement, no parent
+      return false;
+   }
+
    int rc;
    bool retry;
    int numberOfRetries = 0;
@@ -155,13 +213,23 @@ int SQLiteResultSet::intForColumn(const std::string& columnName) const {
       return 0;
    }
 
-   return sqlite3_column_int(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return sqlite3_column_int(stmt, columnIdx);
 }
 
 //******************************************************************************
 
 int SQLiteResultSet::intForColumnIndex(int columnIdx) const {
-   return sqlite3_column_int(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return sqlite3_column_int(stmt, columnIdx);
 }
 
 //******************************************************************************
@@ -177,13 +245,23 @@ long SQLiteResultSet::longForColumn(const std::string& columnName) const {
       return 0;
    }
 
-   return (long)sqlite3_column_int64(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return (long)sqlite3_column_int64(stmt, columnIdx);
 }
 
 //******************************************************************************
 
 long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
-   return (long)sqlite3_column_int64(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return (long)sqlite3_column_int64(stmt, columnIdx);
 }
 
 //******************************************************************************
@@ -211,20 +289,34 @@ double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
       return 0;
    }
 
-   return sqlite3_column_double(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return sqlite3_column_double(stmt, columnIdx);
 }
 
 //******************************************************************************
 
 double SQLiteResultSet::doubleForColumnIndex(int columnIdx) const {
-   return sqlite3_column_double(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return sqlite3_column_double(stmt, columnIdx);
 }
 
 //******************************************************************************
 
 std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
-   const char *c =
-      (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return nullptr;
+   }
+
+   const char *c = (const char *)sqlite3_column_text(stmt, columnIdx);
 
    if (!c) {
       return nullptr;
@@ -271,8 +363,13 @@ bool SQLiteResultSet::stringForColumn(const std::string& columnName,
 
 bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
                                            std::string& columnValue) const {
-   const char *c =
-      (const char *)sqlite3_column_text(m_statement->statement(), columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      columnValue = "";
+      return false;
+   }
+
+   const char *c = (const char *)sqlite3_column_text(stmt, columnIdx);
 
    if (c != nullptr) {
       columnValue = c;
@@ -324,17 +421,26 @@ DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 DBData* SQLiteResultSet::dataForColumnIndex(int columnIdx) const {
-   const unsigned long dataSize =
-      sqlite3_column_bytes(m_statement->statement(), columnIdx);
-   const void* pBuffer = sqlite3_column_blob(m_statement->statement(),
-                                             columnIdx);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return new DBData();
+   }
+
+   const unsigned long dataSize = sqlite3_column_bytes(stmt, columnIdx);
+   const void* pBuffer = sqlite3_column_blob(stmt, columnIdx);
    return new DBData(pBuffer, dataSize);
 }
 
 //******************************************************************************
 
 void SQLiteResultSet::setParentDB(SQLiteDatabase* newDb) {
+   if (m_parentDB != nullptr) {
+      m_parentDB->unregisterCursor(this);
+   }
    m_parentDB = newDb;
+   if (m_parentDB != nullptr) {
+      m_parentDB->registerCursor(this);
+   }
 }
 
 //******************************************************************************
@@ -346,20 +452,36 @@ SQLiteStatement* SQLiteResultSet::statement() {
 //******************************************************************************
 
 void SQLiteResultSet::setStatement(SQLiteStatement* value) {
+   if (value == m_statement) {
+      return;
+   }
+   releaseStatement();
    m_statement = value;
+   if (m_statement != nullptr) {
+      m_statement->attachCursor();
+   }
 }
 
 //******************************************************************************
 
 int SQLiteResultSet::getColumnCount() const {
-   return sqlite3_column_count(m_statement->statement());
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return 0;
+   }
+
+   return sqlite3_column_count(stmt);
 }
 
 //******************************************************************************
 
 DBValueType SQLiteResultSet::getTypeForColumnIndex(int columnIndex) const {
-   const int colType = sqlite3_column_type(m_statement->statement(),
-                                           columnIndex);
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr) {
+      return ValueTypeNull;
+   }
+
+   const int colType = sqlite3_column_type(stmt, columnIndex);
    DBValueType dbValueType;
 
    switch (colType) {

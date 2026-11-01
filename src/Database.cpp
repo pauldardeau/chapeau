@@ -186,15 +186,21 @@ void Database::setCachedStatement(DBStatement* statement,
 //******************************************************************************
 
 void Database::clearCachedStatements() {
-   for (auto& pair : m_cachedStatements) {
-      // close the statements
-      DBStatement* statement = pair.second;
-      statement->close();
-      delete statement;
-   }
+   // empty the cache first, so that nothing handed to
+   // discardCachedStatement() is still reachable through it
+   std::map<std::string, DBStatement*> cached;
+   cached.swap(m_cachedStatements);
 
-   m_cachedStatements.erase(m_cachedStatements.begin(),
-                            m_cachedStatements.end());
+   for (auto& pair : cached) {
+      discardCachedStatement(pair.second);
+   }
+}
+
+//******************************************************************************
+
+void Database::discardCachedStatement(DBStatement* statement) {
+   statement->close();
+   delete statement;
 }
 
 //******************************************************************************

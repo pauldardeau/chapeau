@@ -94,6 +94,13 @@ void TestSQLiteFoundation::runTests() {
    test_zero_row_results();
    test_transactions();
    test_constraint_error_recovery();
+   test_cursor_after_database_close();
+   test_cursor_after_database_destruction();
+   test_cursor_with_cache_disabled();
+   test_cursor_close_and_destroy_repeated();
+   test_cursor_invalid_after_reopen();
+   test_temporary_text_arguments();
+   test_temporary_blob_arguments();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -324,7 +331,8 @@ void TestSQLiteFoundation::test_parameter_binding() {
          {3, "cherry"}, {1, "apple"}, {2, "banana"}, {3, "cherry"}
       };
       for (const auto& lookup : lookups) {
-         // the arguments must outlive the result set that was built from them
+         // (the arguments need not outlive the result set; see
+         // test_temporary_text_arguments)
          DBStatementArgs args;
          args.add(new DBLong(lookup.id));
          unique_ptr<DBResultSet> rs(
@@ -647,5 +655,419 @@ void TestSQLiteFoundation::test_constraint_error_recovery() {
    }
    requireLongEquals(3, scalar(db, "select count(*) from u"),
                      "connection still works after those failures");
+   db.close();
+}
+
+// ---- result-set and argument lifetime (CH-01, CH-02) -----------------------
+
+namespace {
+
+SQLiteResultSet* openCursor(SQLiteDatabase& db, const string& sql) {
+   return dynamic_cast<SQLiteResultSet*>(db.executeQuery(sql));
+}
+
+SQLiteResultSet* openCursor(SQLiteDatabase& db,
+                            const string& sql,
+                            const DBStatementArgs& args) {
+   return dynamic_cast<SQLiteResultSet*>(db.executeQuery(sql, args));
+}
+
+const char* const ITEMS_BY_ID = "select id, name from items order by id";
+
+}
+
+// A result set with no data behind it (its database was closed or destroyed)
+// answers like a NULL column everywhere, and never touches freed memory.
+void TestSQLiteFoundation::requireCursorHasNoData(SQLiteResultSet& rs,
+                                                  const string& when) {
+   require(!rs.next(), when + ": next() is false");
+   requireLongEquals(0, rs.intForColumnIndex(0), when + ": intForColumnIndex");
+   requireLongEquals(0, rs.longForColumnIndex(0), when + ": longForColumnIndex");
+   require(!rs.boolForColumnIndex(0), when + ": boolForColumnIndex");
+   requireDoubleEquals(0.0, rs.doubleForColumnIndex(0), when + ": doubleForColumnIndex");
+   requireLongEquals(0, rs.intForColumn("id"), when + ": intForColumn");
+   requireLongEquals(0, rs.longForColumn("id"), when + ": longForColumn");
+   requireDoubleEquals(0.0, rs.doubleForColumn("id"), when + ": doubleForColumn");
+
+   unique_ptr<string> text(rs.stringForColumnIndex(0));
+   require(text == nullptr, when + ": stringForColumnIndex gives no string");
+   unique_ptr<string> namedText(rs.stringForColumn("name"));
+   require(namedText == nullptr, when + ": stringForColumn gives no string");
+   string value = "unchanged";
+   require(!rs.stringForColumnIndex(0, value), when + ": stringForColumnIndex(string&)");
+   requireStringEquals("", value, when + ": stringForColumnIndex(string&) clears its argument");
+   require(!rs.stringForColumn("name", value), when + ": stringForColumn(string&)");
+
+   unique_ptr<DBData> data(rs.dataForColumnIndex(0));
+   require(data != nullptr && data->length() == 0, when + ": dataForColumnIndex is empty");
+   unique_ptr<DBDate> date(rs.dateForColumnIndex(0));
+   require(date != nullptr, when + ": dateForColumnIndex");
+   if (date) {
+      requireDoubleEquals(0.0, date->timeIntervalSince1970(), when + ": date is 0.0");
+   }
+   requireLongEquals(0, rs.getColumnCount(), when + ": getColumnCount");
+   require(rs.getTypeForColumnIndex(0) == ValueTypeNull, when + ": getTypeForColumnIndex");
+   requireLongEquals(-1, rs.columnIndexForName("id"), when + ": columnIndexForName");
+}
+
+void TestSQLiteFoundation::test_cursor_after_database_close() {
+   TEST_CASE("test_cursor_after_database_close");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cursor_close.sqlite3"));
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), when + ": first row before close()");
+      if (!rs) {
+         continue;
+      }
+      requireLongEquals(1, rs->intForColumnIndex(0), when + ": id before close()");
+
+      db.close();   // a live cursor must neither block nor survive this
+      require(db.sqliteHandle() == nullptr, when + ": the connection really closed");
+      requireCursorHasNoData(*rs, when + ", after close()");
+
+      rs.reset();
+      require(db.open(), when + ": reopen");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cursor_after_database_destruction() {
+   TEST_CASE("test_cursor_after_database_destruction");
+   chapeau_tests::ScopedTempDir dir;
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      auto db = make_unique<SQLiteDatabase>(
+         dir.file("cursor_destroy" + to_string(pass) + ".sqlite3"));
+      require(db->open(), when + ": open");
+      require(createItems(*db), when + ": create and fill the items table");
+      db->setShouldCacheStatements(pass == 0);
+
+      unique_ptr<SQLiteResultSet> stepped(openCursor(*db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> fresh(openCursor(*db, "select name from items order by id"));
+      require(stepped && stepped->next(), when + ": a stepped cursor");
+      require(fresh != nullptr, when + ": a cursor that was never stepped");
+
+      db.reset();   // the database goes first
+
+      if (stepped) {
+         requireCursorHasNoData(*stepped, when + ", stepped cursor, after destruction");
+      }
+      if (fresh) {
+         requireCursorHasNoData(*fresh, when + ", fresh cursor, after destruction");
+      }
+      fresh.reset();
+      stepped.reset();
+   }
+}
+
+void TestSQLiteFoundation::test_cursor_with_cache_disabled() {
+   TEST_CASE("test_cursor_with_cache_disabled");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cursor_cache.sqlite3"));
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   {
+      // switching the cache off does not take a live cursor's statement away
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "first row");
+      if (rs) {
+         requireLongEquals(1, rs->intForColumnIndex(0), "first id");
+         db.setShouldCacheStatements(false);
+         require(rs->next(), "second row after the cache was switched off");
+         requireLongEquals(2, rs->intForColumnIndex(0), "second id");
+         require(rs->next(), "third row");
+         requireLongEquals(3, rs->intForColumnIndex(0), "third id");
+         require(!rs->next(), "no fourth row");
+      }
+   }
+
+   // the database keeps working with the cache off, and with it back on
+   requireLongEquals(3, scalar(db, "select count(*) from items"), "query with the cache off");
+   db.setShouldCacheStatements(true);
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      int rows = 0;
+      while (rs && rows < 3 && rs->next()) {
+         ++rows;
+         requireLongEquals(rows, rs->intForColumnIndex(0), "id on a new cached cursor");
+      }
+      requireLongEquals(3, rows, "all rows on a new cached cursor");
+   }
+
+   {
+      // cache switched off while a cursor is live, then the database closes
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "a live cursor");
+      db.setShouldCacheStatements(false);
+      db.close();
+      if (rs) {
+         requireCursorHasNoData(*rs, "cursor that outlived both the cache and the connection");
+      }
+   }
+   require(db.open(), "reopen");
+   db.setShouldCacheStatements(true);
+   requireLongEquals(3, scalar(db, "select count(*) from items"), "usable after all of that");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cursor_close_and_destroy_repeated() {
+   TEST_CASE("test_cursor_close_and_destroy_repeated");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cursor_repeat.sqlite3"));
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      {
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         require(rs && rs->next(), when + ": a row");
+         if (rs) {
+            rs->close();
+            rs->close();
+            rs->close();
+         }
+      }   // destroyed after being closed three times
+
+      {
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         int rows = 0;
+         while (rs && rs->next()) {
+            ++rows;
+         }
+         requireLongEquals(3, rows, when + ": a full pass");
+         if (rs) {
+            rs->close();   // already closed by reaching the end
+            rs->close();
+         }
+      }
+
+      {
+         // two cursors, destroyed in both orders
+         unique_ptr<SQLiteResultSet> first(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> second(openCursor(db, "select name from items"));
+         require(first && second, when + ": two cursors");
+         first.reset();
+         second.reset();
+         unique_ptr<SQLiteResultSet> third(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> fourth(openCursor(db, "select name from items"));
+         require(third && fourth, when + ": two more cursors");
+         fourth.reset();
+         third.reset();
+      }
+
+      requireLongEquals(3, scalar(db, "select count(*) from items"),
+                        when + ": the database is intact");
+   }
+
+   {
+      // closing an invalid cursor again is also harmless
+      db.setShouldCacheStatements(true);
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "a live cursor");
+      db.close();
+      if (rs) {
+         rs->close();
+         rs->close();
+      }
+      rs.reset();
+   }
+   require(db.open(), "reopen");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cursor_invalid_after_reopen() {
+   TEST_CASE("test_cursor_invalid_after_reopen");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cursor_reopen.sqlite3"));
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   unique_ptr<SQLiteResultSet> old(openCursor(db, ITEMS_BY_ID));
+   require(old && old->next(), "a row from the old cursor");
+
+   db.close();
+   require(db.open(), "reopen the same file");
+   requireLongEquals(3, scalar(db, "select count(*) from items"), "the data is still there");
+
+   // the old cursor is not revived by the database being open again
+   if (old) {
+      requireCursorHasNoData(*old, "old cursor after reopen");
+   }
+
+   unique_ptr<SQLiteResultSet> fresh(openCursor(db, ITEMS_BY_ID));
+   require(fresh && fresh->next(), "a new cursor works");
+   if (fresh) {
+      requireLongEquals(1, fresh->intForColumnIndex(0), "the new cursor starts at the first row");
+   }
+   if (old) {
+      require(!old->next(), "old cursor is still invalid while the new one is live");
+   }
+   if (fresh) {
+      require(fresh->next(), "the new cursor is unaffected by the old one");
+      requireLongEquals(2, fresh->intForColumnIndex(0), "the new cursor's second row");
+   }
+   fresh.reset();
+   old.reset();
+   db.close();
+}
+
+void TestSQLiteFoundation::test_temporary_text_arguments() {
+   TEST_CASE("test_temporary_text_arguments");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("text_args.sqlite3"));
+   require(db.open(), "open");
+
+   const string first = string(5000, 'a') + "-first";
+   const string second = string(7000, 'b') + "-second";
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      // the arguments are gone before the first next()
+      auto args = make_unique<DBStatementArgs>();
+      args->add(new DBString(first));
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", *args));
+      args.reset();
+      require(rs && rs->next(), when + ": a row");
+      if (rs) {
+         string value;
+         require(rs->stringForColumnIndex(0, value), when + ": the text is not NULL");
+         requireStringEquals(first, value, when + ": text bound from destroyed arguments");
+      }
+      rs.reset();
+
+      // the same SQL again, with different text, also destroyed before stepping
+      auto again = make_unique<DBStatementArgs>();
+      again->add(new DBString(second));
+      rs.reset(openCursor(db, "select ?", *again));
+      again.reset();
+      require(rs && rs->next(), when + ": a row from the second execution");
+      if (rs) {
+         string value;
+         rs->stringForColumnIndex(0, value);
+         requireStringEquals(second, value, when + ": text from the second execution");
+      }
+      rs.reset();
+   }
+   db.setShouldCacheStatements(true);
+
+   // an update whose statement stays cached after its arguments are gone
+   require(exec(db, "create table words(id integer primary key, w text)"), "create table");
+   for (int id = 1; id <= 2; ++id) {
+      auto args = make_unique<DBStatementArgs>();
+      args->add(new DBLong(id));
+      args->add(new DBString(id == 1 ? first : second));
+      unsigned long rowsAffected = 0;
+      require(db.executeUpdate("insert into words(id,w) values (?,?)", *args, rowsAffected),
+              "insert with temporary arguments");
+   }
+   requireLongEquals(static_cast<long long>(first.size()),
+                     scalar(db, "select length(w) from words where id = 1"), "first stored length");
+   requireLongEquals(static_cast<long long>(second.size()),
+                     scalar(db, "select length(w) from words where id = 2"), "second stored length");
+
+   // NULL and empty-string handling is unchanged
+   {
+      auto args = make_unique<DBStatementArgs>();
+      args->add(nullptr);
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", *args));
+      args.reset();
+      require(rs && rs->next(), "a row for a NULL argument");
+      if (rs) {
+         require(rs->getTypeForColumnIndex(0) == ValueTypeNull, "a null argument is bound as NULL");
+         unique_ptr<string> text(rs->stringForColumnIndex(0));
+         require(text == nullptr, "and reads back as no string");
+      }
+   }
+   {
+      auto args = make_unique<DBStatementArgs>();
+      args->add(new DBNull("Null"));
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", *args));
+      args.reset();
+      require(rs && rs->next(), "a row for a DBNull argument");
+      if (rs) {
+         require(rs->getTypeForColumnIndex(0) == ValueTypeNull, "a DBNull argument is bound as NULL");
+      }
+   }
+   {
+      auto args = make_unique<DBStatementArgs>();
+      args->add(new DBString(""));
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", *args));
+      args.reset();
+      require(rs && rs->next(), "a row for an empty string");
+      if (rs) {
+         require(rs->getTypeForColumnIndex(0) == ValueTypeText, "an empty string is bound as text");
+         string value = "unchanged";
+         require(rs->stringForColumnIndex(0, value), "the empty string is not NULL");
+         requireStringEquals("", value, "and reads back empty");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_temporary_blob_arguments() {
+   TEST_CASE("test_temporary_blob_arguments");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("blob_args.sqlite3"));
+   require(db.open(), "open");
+
+   // not a string: embedded NULs, every byte value, longer than any small buffer
+   string firstBytes;
+   string secondBytes;
+   for (int i = 0; i < 4096; ++i) {
+      firstBytes.push_back(static_cast<char>(i % 251));
+      secondBytes.push_back(static_cast<char>((i * 7 + 3) % 256));
+   }
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      const string* const blobs[] = {&firstBytes, &secondBytes};
+      for (const string* blob : blobs) {
+         auto args = make_unique<DBStatementArgs>();
+         args->add(new DBData(blob->data(), blob->size()));
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", *args));
+         args.reset();   // the DBData is gone before the first next()
+         require(rs && rs->next(), when + ": a row");
+         if (rs) {
+            unique_ptr<DBData> data(rs->dataForColumnIndex(0));
+            require(data != nullptr, when + ": a blob");
+            if (data) {
+               requireLongEquals(static_cast<long long>(blob->size()), data->length(),
+                                 when + ": blob length");
+               require(::memcmp(data->value(), blob->data(), blob->size()) == 0,
+                       when + ": blob bytes bound from destroyed arguments");
+            }
+         }
+      }
+   }
+   db.setShouldCacheStatements(true);
+
+   require(exec(db, "create table blobs(id integer primary key, b blob)"), "create table");
+   for (int id = 1; id <= 2; ++id) {
+      const string& bytes = (id == 1) ? firstBytes : secondBytes;
+      auto args = make_unique<DBStatementArgs>();
+      args->add(new DBLong(id));
+      args->add(new DBData(bytes.data(), bytes.size()));
+      unsigned long rowsAffected = 0;
+      require(db.executeUpdate("insert into blobs(id,b) values (?,?)", *args, rowsAffected),
+              "insert a blob from temporary arguments");
+   }
+   requireLongEquals(2, scalar(db, "select count(*) from blobs where typeof(b) = 'blob' and length(b) = 4096"),
+                     "both blobs are stored as 4096-byte blobs");
    db.close();
 }

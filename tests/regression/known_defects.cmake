@@ -21,10 +21,6 @@
 # today (no assertion); once the API exists, add a real check and a table line.
 
 set(CHAPEAU_DEFECT_TABLE
-   "CH-01|ch01_cursor_after_close|60|result set used after close() of its database"
-   "CH-01|ch01_cursor_after_database_destroyed|60|result set destroyed after its database object"
-   "CH-01|ch01_cursor_after_cache_disabled|60|result set used after the statement cache was switched off"
-   "CH-02|ch02_bound_args_destroyed_before_step|60|bound arguments destroyed before the result set is stepped"
    "CH-03|ch03_noarg_overload_invalidates_cached_statement|60|no-argument overload finalizes a statement the cache still holds"
    "CH-04|ch04_two_cursors_same_sql_independent|60|two live cursors over the same SQL share one statement"
    "CH-05|ch05_next_after_end_cached|60|next() after the end restarts the query (cached)"
@@ -35,10 +31,17 @@ set(CHAPEAU_DEFECT_TABLE
    "CH-07|ch07_busy_next_hang|10|next() retries forever on a busy database"
    "CH-07|ch07_begin_blocked_by_open_cursor|10|beginTransaction() retries forever while a cursor is open elsewhere"
    "CH-07|ch07_commit_blocked_by_reader|10|commit() retries forever while a reader is active elsewhere"
-   "CH-07|ch07_close_with_live_cursor|10|close() retries forever with an uncached cursor alive"
-   "CH-07|ch07_destructor_with_live_cursor|10|destructor retries forever with an uncached cursor alive"
 )
 
 # Reproductions whose defect has been fixed; run in the default test set.
 set(CHAPEAU_FIXED_TABLE
+   "CH-01|ch01_cursor_after_close|60|result set used after close() of its database"
+   "CH-01|ch01_cursor_after_database_destroyed|60|result set destroyed after its database object"
+   "CH-01|ch01_cursor_after_cache_disabled|60|result set used after the statement cache was switched off"
+   "CH-02|ch02_bound_args_destroyed_before_step|60|bound arguments destroyed before the result set is stepped"
+   # fixed as a consequence of the CH-01 ownership change (close() and the
+   # destructor now invalidate live result sets and finalize their statements);
+   # the busy-wait loops themselves (CH-07 proper) are unchanged
+   "CH-07|ch07_close_with_live_cursor|10|close() retries forever with an uncached cursor alive"
+   "CH-07|ch07_destructor_with_live_cursor|10|destructor retries forever with an uncached cursor alive"
 )

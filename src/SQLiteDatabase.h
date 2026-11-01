@@ -3,6 +3,7 @@
 
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "sqlite3.h"
@@ -99,8 +100,25 @@ public:
 protected:
    void complainAboutInUse();
 
+   // a statement that a live result set is still using is not deleted when
+   // it leaves the cache; the result set becomes its owner
+   void discardCachedStatement(DBStatement* statement);
+
 
 private:
+   friend class SQLiteResultSet;
+
+   // Result sets created by this database that have not been closed or
+   // destroyed yet. close() and the destructor invalidate each of them
+   // (see SQLiteResultSet::invalidate) so that none outlives the connection
+   // or the statements it uses. Raw pointers: the database owns neither the
+   // result sets nor, through this set, anything else.
+   void registerCursor(SQLiteResultSet* resultSet);
+   void unregisterCursor(SQLiteResultSet* resultSet);
+   void invalidateCursors();
+
+   std::set<SQLiteResultSet*> m_cursors;
+
    sqlite3*    m_db;
    std::string m_databasePath;
    bool        m_logsErrors;
@@ -135,6 +153,14 @@ public:
    void incrementUseCount();
    bool isCached() const;
 
+   // The number of live result sets using this statement. A statement
+   // that is not cached (or no longer is, see SQLiteDatabase::
+   // discardCachedStatement) is deleted when the last of them lets go.
+   int cursorCount() const;
+   void attachCursor();
+   int detachCursor();
+   void setCached(bool value);
+
    std::string description() const;
 
 
@@ -143,6 +169,7 @@ private:
    std::string m_query;
    long m_useCount;
    bool m_isCached;
+   int m_cursorCount;
 
    SQLiteStatement();
    SQLiteStatement(const SQLiteStatement&);

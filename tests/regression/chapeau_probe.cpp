@@ -12,12 +12,14 @@
 //   characterize_*  prints what happens today without asserting anything
 //               (CH-08; see below). Not registered as a test.
 //
-//   ch<nn>_*    KNOWN DEFECTS from the H1a investigation (CH-01 .. CH-07).
+//   ch<nn>_*    reproductions of the H1a defects (CH-01 .. CH-07).
 //               Each one describes what a fixed Chapeau must do and ends
 //               with exit 0 only then. Today they end in a sanitizer report,
 //               a crash, a hang (killed by the harness) or a failed CHECK.
-//               They are registered only when CHAPEAU_KNOWN_DEFECTS=ON and
-//               are NOT part of the default test set; see CMakeLists.txt.
+//               While a defect exists they are registered only when
+//               CHAPEAU_KNOWN_DEFECTS=ON and are NOT in the default test set;
+//               once fixed they move to CHAPEAU_FIXED_TABLE in
+//               known_defects.cmake and run by default.
 //
 // The memory-safety defects (CH-01, CH-02) read freed memory. In a plain
 // build that may go unnoticed, crash, or return garbage; they are only
