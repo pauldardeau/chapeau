@@ -4,7 +4,9 @@
 
 class Tests {
 public:
-   void run();
+   // runs every suite; returns the process exit code (0 = everything passed
+   // and at least one assertion ran, 1 = a failure or an empty run)
+   int run();
 };
 
 #endif

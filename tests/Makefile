@@ -11,7 +11,8 @@ PROJ_OBJS = ../src/Database.o \
 ../src/SQLiteResultSet.o
 
 POIVRE_OBJS = TestCase.o \
-TestSuite.o
+TestSuite.o \
+TestRegistry.o
 
 OBJS = fs_test_case.o \
 test_database.o \
