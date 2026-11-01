@@ -114,6 +114,31 @@ foreach(scenario
       TIMEOUT 30 LABEL regression)
 endforeach()
 
+# the busy timeout, and what a locked database does to each kind of call: the
+# scenarios wait for a lock on purpose, so they run in bounded subprocesses
+foreach(scenario
+   busy_zero_timeout_fails_at_once
+   busy_positive_timeout_waits_then_fails
+   busy_timeout_before_and_after_open
+   busy_update_fails_then_recovers
+   busy_close_under_contention)
+   chapeau_add_case(regression_${scenario} chapeau_probe ${scenario}
+      TIMEOUT 60 LABEL regression)
+endforeach()
+
+# the messages printed for a failed sqlite3_step: SQLite's own code and text,
+# and no "Unknown error" for a code SQLite defines
+chapeau_add_case(regression_diagnostics_step_error_messages chapeau_probe
+   diagnostics_step_error_messages
+   TIMEOUT 60 LABEL regression
+   MATCH
+      "Error calling sqlite3_step in executeUpdate [(]19: UNIQUE constraint failed: t[.]id[)]"
+      "Error calling sqlite3_step in next[(][)] [(]19: UNIQUE constraint failed: t[.]id[)]"
+      "Error calling sqlite3_step in next[(][)] [(]1: integer overflow[)]"
+      "Database busy [(][^)]*[)]: executeUpdate gave up after waiting 100 ms for the lock"
+   REJECT
+      "Unknown error")
+
 # ---- reproductions of defects that have been fixed ---------------------------
 
 foreach(entry IN LISTS CHAPEAU_FIXED_TABLE)

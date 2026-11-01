@@ -28,8 +28,9 @@ class SQLiteResultSet;
  * update prepared before an ALTER TABLE or CREATE INDEX still works, and sees
  * the new schema, afterwards.
  *
- * Deliberately NOT covered here: busy-wait behaviour. That is a known defect;
- * see tests/regression/
+ * Also covers the busy timeout setting (CH-07) and the result-set status and
+ * error code (CH-08). Lock contention itself -- which waits on purpose -- is
+ * exercised in bounded subprocesses, see tests/regression/.
  */
 class TestSQLiteFoundation : public poivre::TestSuite {
 protected:
@@ -65,6 +66,9 @@ protected:
    void test_schema_change_repeated();
    void test_schema_change_then_constraint_error();
    void test_schema_change_with_independent_cursors();
+   void test_busy_timeout_configuration();
+   void test_result_set_status_transitions();
+   void test_close_with_unfinalized_statement();
 
    void requireLongEquals(long long expected,
                           long long actual,

@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <unistd.h>
 
 #include "SQLiteResultSet.h"
 #include "SQLiteDatabase.h"
@@ -19,7 +18,9 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
                                  const std::string& query) :
    m_parentDB(db),
    m_statement(statement),
-   m_columnNamesSetup(false) {
+   m_columnNamesSetup(false),
+   m_status(DBResultSetStatus::Ready),
+   m_errorCode(0) {
    setQuery(query);
 
    if (m_statement != nullptr) {
@@ -65,7 +66,21 @@ void SQLiteResultSet::releaseStatement() {
 
 //******************************************************************************
 
-void SQLiteResultSet::close() {
+bool SQLiteResultSet::isFinished() const {
+   return m_status == DBResultSetStatus::Done ||
+          m_status == DBResultSetStatus::Error ||
+          m_status == DBResultSetStatus::Invalidated;
+}
+
+//******************************************************************************
+
+void SQLiteResultSet::finish(DBResultSetStatus finalStatus, int errorCode) {
+   // the first final state is the one that stays
+   if (!isFinished()) {
+      m_status = finalStatus;
+      m_errorCode = errorCode;
+   }
+
    // ends the iteration for good: once the statement is released there is
    // nothing left to step, so next() stays false and the query cannot restart
    releaseStatement();
@@ -77,9 +92,32 @@ void SQLiteResultSet::close() {
 
 //******************************************************************************
 
+void SQLiteResultSet::close() {
+   finish(DBResultSetStatus::Done, 0);
+}
+
+//******************************************************************************
+
+DBResultSetStatus SQLiteResultSet::status() const {
+   return m_status;
+}
+
+//******************************************************************************
+
+int SQLiteResultSet::lastErrorCode() const {
+   return m_errorCode;
+}
+
+//******************************************************************************
+
 void SQLiteResultSet::invalidate() {
    // the database is closing or being destroyed: it has already taken this
-   // result set out of its own list, and must not be called back
+   // result set out of its own list, and must not be called back. A result
+   // set that had already ended keeps the state it ended in.
+   if (!isFinished()) {
+      m_status = DBResultSetStatus::Invalidated;
+      m_errorCode = 0;
+   }
    releaseStatement();
    m_parentDB = nullptr;
    m_columnNameToIndexMap.clear();
@@ -120,62 +158,39 @@ void SQLiteResultSet::setupColumnNames() const {
 //******************************************************************************
 
 bool SQLiteResultSet::next() {
-   sqlite3_stmt* const stmt = sqliteStatement();
-   if (stmt == nullptr || m_parentDB == nullptr) {
-      // exhausted, closed, or invalidated by the database closing: there is
+   if (isFinished()) {
+      // done, failed, or invalidated by the database closing: there is
       // nothing to step, and there never will be again
       return false;
    }
 
-   int rc;
-   bool retry;
-   int numberOfRetries = 0;
-   const int parentBusyRetryTimeout = m_parentDB->busyRetryTimeout();
-
-   do {
-      retry = false;
-
-      rc = sqlite3_step(stmt);
-
-      if (SQLITE_BUSY == rc) {
-         // this will happen if the db is locked, like if we are doing an update or insert.
-         // in that case, retry the step... and maybe wait just 10 milliseconds.
-         retry = true;
-         usleep(20);
-
-         if (parentBusyRetryTimeout && (numberOfRetries++ > parentBusyRetryTimeout)) {
-            ::printf("%s:%d Database busy (%s)\n",
-                     __FUNCTION__,
-                     __LINE__,
-                     m_parentDB->databasePath().c_str());
-            Logger::warning("Database busy");
-            break;
-         }
-      } else if (SQLITE_DONE == rc || SQLITE_ROW == rc) {
-         // all is well, let's return.
-      } else if (SQLITE_ERROR == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) rs\n",
-                  rc,
-                  sqlite3_errmsg(m_parentDB->sqliteHandle()));
-         break;
-      } else if (SQLITE_MISUSE == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) rs\n",
-                  rc,
-                  sqlite3_errmsg(m_parentDB->sqliteHandle()));
-         break;
-      } else {
-         ::printf("Unknown error calling sqlite3_step (%d: %s) rs\n",
-                  rc,
-                  sqlite3_errmsg(m_parentDB->sqliteHandle()));
-         break;
-      }
-   } while (retry);
-
-   if (rc != SQLITE_ROW) {
-      close();
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr || m_parentDB == nullptr) {
+      // no statement to run (a result set made without one)
+      finish(DBResultSetStatus::Done, 0);
+      return false;
    }
 
-   return (rc == SQLITE_ROW);
+   // sqlite3_step() waits for a lock for as long as the database's busy
+   // timeout allows (see SQLiteDatabase::setBusyRetryTimeout) and then fails
+   // with SQLITE_BUSY like any other error
+   const int rc = sqlite3_step(stmt);
+
+   if (SQLITE_ROW == rc) {
+      m_status = DBResultSetStatus::Row;
+      return true;
+   }
+
+   if (SQLITE_DONE == rc) {
+      finish(DBResultSetStatus::Done, 0);
+      return false;
+   }
+
+   // a failed step is not the end of the data: say so, keep the error code
+   // for after the statement is released, and do not try the query again
+   m_parentDB->reportStepError("next()", rc, query());
+   finish(DBResultSetStatus::Error, rc);
+   return false;
 }
 
 //******************************************************************************

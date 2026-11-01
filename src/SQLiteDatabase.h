@@ -91,8 +91,28 @@ public:
    bool checkedOut();
    void setCheckedOut(bool flag);
 
+   /**
+    * How long, in milliseconds, an operation on this connection waits for
+    * another connection's lock to go away before it fails with SQLITE_BUSY
+    * (a failed query, update, transaction call or result set; never an
+    * endless wait). The wait is done by SQLite itself
+    * (sqlite3_busy_timeout), not by a retry loop in Chapeau.
+    *
+    * 0 means do not wait at all: fail at once. The default is
+    * DEFAULT_BUSY_TIMEOUT_MS.
+    */
    int busyRetryTimeout();
+
+   /**
+    * Sets the busy timeout, in milliseconds (previous versions counted retries
+    * here, with 0 meaning forever). It may be set before open() -- it is then
+    * applied when the connection is opened, and again if the database is
+    * closed and reopened -- or at any time on an open connection. A negative
+    * value is treated as 0.
+    */
    void setBusyRetryTimeout(int newBusyRetryTimeout);
+
+   static const int DEFAULT_BUSY_TIMEOUT_MS = 5000;
 
    static std::string sqliteLibVersion();
 
@@ -107,6 +127,15 @@ protected:
 
 private:
    friend class SQLiteResultSet;
+
+   // says on stdout what sqlite3_step() returned in 'where', with SQLite's own
+   // message; a busy database is reported as such
+   void reportStepError(const char* where, int rc, const std::string& sql);
+
+   // prepares sql (sqlite3_prepare_v2) into *ppStmt; on failure *ppStmt is null
+   // and the reason is reported. A prepare that has to read the schema waits
+   // for a lock for as long as the busy timeout allows.
+   bool prepareStatement(const std::string& sql, sqlite3_stmt** ppStmt);
 
    // Result sets created by this database that have not been closed or
    // destroyed yet. close() and the destructor invalidate each of them

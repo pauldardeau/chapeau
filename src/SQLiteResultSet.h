@@ -26,7 +26,22 @@ class Date;
  *
  * It ends, for good, when next() returns false (the data is exhausted, or an
  * error or busy-timeout stopped it), when close() is called, or when the
- * database it came from is closed or destroyed. An ended result set has let go
+ * database it came from is closed or destroyed. status() says which:
+ *
+ *   new result set                         Ready,       lastErrorCode() 0
+ *   next() returned true                   Row,         0
+ *   data exhausted (next() false)          Done,        0
+ *   close() on an active result set        Done,        0
+ *   sqlite3_step failed, busy included     Error,       the sqlite3_step result
+ *   database closed or destroyed under an
+ *     active result set                    Invalidated, 0
+ *
+ * The first of these final states is the one that stays: a result set that
+ * already ended as Done or Error is not turned into Invalidated by the
+ * database closing later, and its error code is kept. next() on an ended
+ * result set is false, whatever the reason it ended.
+ *
+ * An ended result set has let go
  * of its statement: next() keeps returning false (the query never restarts),
  * close() may be repeated, and every column accessor returns what it returns
  * for a NULL column (0, false, 0.0, nullptr/false for strings, an empty
@@ -62,6 +77,19 @@ public:
     * destroyed (then there is nothing left to do).
     */
    void close();
+
+   /**
+    * @return the status of this result set (see the class comment)
+    */
+   DBResultSetStatus status() const;
+
+   /**
+    * @return the sqlite3_step result that ended this result set when
+    * status() is DBResultSetStatus::Error (SQLITE_BUSY if the database stayed
+    * locked for longer than the busy timeout), otherwise 0. Kept after the
+    * statement was released.
+    */
+   int lastErrorCode() const;
 
    /**
     *
@@ -245,6 +273,12 @@ private:
    // not cached and has no other user is deleted
    void releaseStatement();
 
+   // ends the result set: the first final state wins (see the class comment),
+   // then the statement is released
+   void finish(DBResultSetStatus finalStatus, int errorCode);
+
+   bool isFinished() const;
+
    // the sqlite3 statement to read from, or nullptr if there is none
    sqlite3_stmt* sqliteStatement() const;
 
@@ -252,6 +286,8 @@ private:
    SQLiteStatement* m_statement;
    mutable std::map<std::string, int> m_columnNameToIndexMap;
    mutable bool m_columnNamesSetup;
+   DBResultSetStatus m_status;
+   int m_errorCode;
 
    SQLiteResultSet();
    SQLiteResultSet(const SQLiteResultSet&);

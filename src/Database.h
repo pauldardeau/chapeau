@@ -37,6 +37,19 @@ enum DBValueType {
 };
 
 /**
+ * Where a result set is in its life, as reported by DBResultSet::status().
+ * Ready, then Row for as long as next() keeps returning true, and then exactly
+ * one of the three final states, which never change afterwards.
+ */
+enum class DBResultSetStatus {
+   Ready,        // created; next() has not been called yet
+   Row,          // the last next() returned true: a row is available
+   Done,         // the data is exhausted, or close() was called
+   Error,        // the query failed; DBResultSet::lastErrorCode() says how
+   Invalidated   // the database was closed or destroyed under it
+};
+
+/**
  *
  */
 class Database {
@@ -425,6 +438,22 @@ public:
     *
     */
    virtual void close() = 0;
+
+   /**
+    * Why next() last returned what it did, which a bool alone cannot say.
+    * A subclass that does not keep track reports Ready.
+    * @return the status of this result set
+    * @see DBResultSetStatus
+    */
+   virtual DBResultSetStatus status() const;
+
+   /**
+    * The error that ended this result set.
+    * @return the database's own error code when status() is
+    * DBResultSetStatus::Error (for SQLite, the result code of sqlite3_step),
+    * otherwise 0
+    */
+   virtual int lastErrorCode() const;
 
    /**
     *

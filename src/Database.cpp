@@ -206,6 +206,18 @@ void Database::discardCachedStatement(DBStatement* statement) {
 //******************************************************************************
 //******************************************************************************
 
+DBResultSetStatus DBResultSet::status() const {
+   return DBResultSetStatus::Ready;
+}
+
+//******************************************************************************
+
+int DBResultSet::lastErrorCode() const {
+   return 0;
+}
+
+//******************************************************************************
+
 const std::string& DBResultSet::query() const {
    return m_query;
 }

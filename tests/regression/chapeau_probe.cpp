@@ -9,10 +9,10 @@
 //   control_*   behaviour that works today. They run as ordinary regression
 //               cases (expected: success) in every build.
 //
-//   characterize_*  prints what happens today without asserting anything
-//               (CH-08; see below). Not registered as a test.
+//   busy_*      the busy timeout and lock contention (bounded waits, errors,
+//               recovery). Also ordinary regression cases.
 //
-//   ch<nn>_*    reproductions of the H1a defects (CH-01 .. CH-07).
+//   ch<nn>_*    reproductions of the H1a defects (CH-01 .. CH-08).
 //               Each one describes what a fixed Chapeau must do and ends
 //               with exit 0 only then. Today they end in a sanitizer report,
 //               a crash, a hang (killed by the harness) or a failed CHECK.
@@ -30,6 +30,7 @@
 // The expected-correct behaviour is deliberately the weakest one that is
 // still correct (no memory error, no hang, no wrong data), so that the
 // eventual fix is free to choose its own API contract.
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -65,6 +66,12 @@ void checkLong(const char* label, long long expected, long long actual) {
    }
    std::printf("CHECK %s: %s (expected %lld, got %lld)\n",
                label, ok ? "PASS" : "FAIL", expected, actual);
+}
+
+// milliseconds on a clock that does not jump, for 'it waited, but not forever' checks
+long long nowMs() {
+   return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 void defect(const char* id, const char* summary) {
@@ -376,49 +383,79 @@ std::map<std::string, Scenario> scenarios() {
       }
    };
 
-   // ===================== CH-07: a busy limit of 0 retries forever =====================
-   // Each of these must return. Today the first call named in the check
-   // never returns; the harness kills the process and reports a timeout.
+   // ===================== CH-07: lock contention is bounded =====================
+   // Another connection holds a lock. A call that needs it waits for the busy
+   // timeout (default 5000 ms; the scenarios that do not test the default use
+   // a short one, to stay fast) and then fails with SQLITE_BUSY. None may wait
+   // forever, and none may be mistaken for success.
 
    s["ch07_busy_prepare_hang"] = [] {
-      defect("CH-07", "executeQuery() retries forever while another connection holds an exclusive lock");
+      defect("CH-07", "executeQuery() retried forever while another connection held an exclusive lock");
       SQLiteDatabase a(g_path);
       openDb(a);
       check("exclusive transaction", a.beginTransaction());
       SQLiteDatabase b(g_path);
       check("second connection opens", b.open());
-      std::printf("executeQuery() with the default busy limit (%d)\n", b.busyRetryTimeout());
+      checkLong("the default busy timeout is 5000 ms", 5000, b.busyRetryTimeout());
+
+      const long long start = nowMs();
       std::unique_ptr<DBResultSet> rs(b.executeQuery("select * from t"));
-      check("executeQuery returned", true);
-      rs.reset();
-      a.rollback();
+      const long long waited = nowMs() - start;
+      check("executeQuery fails: no result set", rs == nullptr);
+      checkLong("and the failure is SQLITE_BUSY", SQLITE_BUSY, b.lastErrorCode());
+      check("it waited for the lock first (at least 2 s of the 5 s)", waited >= 2000);
+      check("and did not wait forever (under 30 s)", waited < 30000);
+
+      check("rollback", a.rollback());
+      rs.reset(b.executeQuery("select id from t"));
+      check("once the lock is released the same call works", rs != nullptr);
    };
 
    s["ch07_busy_next_hang"] = [] {
-      defect("CH-07", "next() retries forever while another connection holds an exclusive lock");
+      defect("CH-07", "next() retried forever while another connection held an exclusive lock");
       SQLiteDatabase a(g_path);
       openDb(a);
       insert3(a);
       SQLiteDatabase b(g_path);
       check("second connection opens", b.open());
+      b.setBusyRetryTimeout(500);
       {
          std::unique_ptr<DBResultSet> warm(b.executeQuery("select id from t"));
          check("statement is cached on the second connection", warm != nullptr);
       }
       check("exclusive transaction", a.beginTransaction());
       std::unique_ptr<DBResultSet> rs(b.executeQuery("select id from t"));
-      check("a cursor was returned (the cached statement needs no prepare)", rs != nullptr);
-      std::printf("next() while the other connection holds the lock\n");
+      check("a cursor is returned (the cached statement needs no prepare)", rs != nullptr);
       if (rs) {
-         rs->next();
+         check("a new result set is Ready", rs->status() == DBResultSetStatus::Ready);
+         const long long start = nowMs();
+         const bool row = rs->next();
+         const long long waited = nowMs() - start;
+         check("next() fails", !row);
+         check("the result set is in the Error state", rs->status() == DBResultSetStatus::Error);
+         checkLong("with SQLITE_BUSY as the error", SQLITE_BUSY, rs->lastErrorCode());
+         check("after waiting for the lock (at least 250 ms of the 500)", waited >= 250);
+         check("and not forever (under 30 s)", waited < 30000);
+         check("next() stays false", !rs->next());
+         check("the state stays Error", rs->status() == DBResultSetStatus::Error);
+         checkLong("and the error code is kept", SQLITE_BUSY, rs->lastErrorCode());
       }
-      check("next() returned", true);
-      rs.reset();
-      a.rollback();
+      check("rollback", a.rollback());
+
+      // contention gone: a new query works; the failed result set stays failed
+      std::unique_ptr<DBResultSet> again(b.executeQuery("select id from t order by id"));
+      int rows = 0;
+      while (again && again->next()) {
+         ++rows;
+      }
+      checkLong("a new query reads all three rows", 3, rows);
+      check("it ended normally: Done", again && again->status() == DBResultSetStatus::Done);
+      check("the failed result set is not restarted", rs && !rs->next());
+      check("and is still Error", rs && rs->status() == DBResultSetStatus::Error);
    };
 
    s["ch07_begin_blocked_by_open_cursor"] = [] {
-      defect("CH-07", "beginTransaction() retries forever while a cursor on another connection holds a read lock");
+      defect("CH-07", "beginTransaction() retried forever while a cursor on another connection held a read lock");
       SQLiteDatabase a(g_path);
       openDb(a);
       insert3(a);
@@ -426,16 +463,29 @@ std::map<std::string, Scenario> scenarios() {
       check("a row is read, so a read lock is held", rs && rs->next());
       SQLiteDatabase b(g_path);
       check("second connection opens", b.open());
-      std::printf("beginTransaction() (BEGIN EXCLUSIVE) while a cursor is open elsewhere\n");
-      b.beginTransaction();
-      check("beginTransaction returned", true);
+      b.setBusyRetryTimeout(500);
+
+      const long long start = nowMs();
+      const bool began = b.beginTransaction();   // BEGIN EXCLUSIVE
+      const long long waited = nowMs() - start;
+      check("beginTransaction fails", !began);
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, b.lastErrorCode());
+      check("it is not recorded as a transaction", !b.inTransaction());
+      check("after waiting for the lock", waited >= 250);
+      check("and not forever", waited < 30000);
+
+      rs.reset();   // the read lock goes away
+      check("once the cursor is gone the same call works", b.beginTransaction());
+      check("and the transaction is recorded", b.inTransaction());
+      check("rollback", b.rollback());
    };
 
    s["ch07_commit_blocked_by_reader"] = [] {
-      defect("CH-07", "commit() retries forever while another connection is mid-read");
+      defect("CH-07", "commit() retried forever while another connection was mid-read");
       SQLiteDatabase a(g_path);
       openDb(a);
       insert3(a);
+      a.setBusyRetryTimeout(500);
       check("deferred transaction", a.beginDeferredTransaction());
       unsigned long n = 0;
       check("a write inside it", a.executeUpdate("insert into t(id,v) values (10,'w')", n));
@@ -443,9 +493,21 @@ std::map<std::string, Scenario> scenarios() {
       check("second connection opens", b.open());
       std::unique_ptr<DBResultSet> rs(b.executeQuery("select id from t"));
       check("the reader holds a shared lock", rs && rs->next());
-      std::printf("commit() while the other connection is mid-read\n");
-      a.commit();
-      check("commit returned", true);
+
+      const long long start = nowMs();
+      const bool committed = a.commit();
+      const long long waited = nowMs() - start;
+      check("commit fails", !committed);
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, a.lastErrorCode());
+      check("the transaction is still open", a.inTransaction());
+      check("after waiting for the reader", waited >= 250);
+      check("and not forever", waited < 30000);
+
+      rs.reset();   // the reader lets go
+      check("once the reader is gone the commit succeeds", a.commit());
+      check("and the transaction is closed", !a.inTransaction());
+      checkLong("the committed row is visible to the other connection", 4,
+                scalar(b, "select count(*) from t"));
    };
 
    s["ch07_close_with_live_cursor"] = [] {
@@ -474,15 +536,10 @@ std::map<std::string, Scenario> scenarios() {
       delete rs;
    };
 
-   // ===================== CH-08: characterization only =====================
-   // A BUSY error inside next() ends the iteration exactly like the end of the
-   // data; DBResultSet has no way to say otherwise (lastErrorCode() on the
-   // database does show SQLITE_BUSY). What a fixed Chapeau must do depends on
-   // an error-reporting API that does not exist, so nothing is asserted: this
-   // prints today's behaviour and is not registered as a test.
+   // ===================== CH-08: a failed step is an error, not the end =====================
 
-   s["characterize_ch08_busy_in_next"] = [] {
-      defect("CH-08", "a BUSY error inside next() looks like the end of the data (characterization, not a test)");
+   s["ch08_busy_in_next_is_an_error"] = [] {
+      defect("CH-08", "a BUSY error inside next() looked like the end of the data");
       SQLiteDatabase a(g_path);
       openDb(a);
       insert3(a);
@@ -495,15 +552,211 @@ std::map<std::string, Scenario> scenarios() {
       b.setBusyRetryTimeout(50);
       check("exclusive transaction", a.beginTransaction());
       std::unique_ptr<DBResultSet> rs(b.executeQuery("select id from t"));
+      check("a result set is returned", rs != nullptr);
       int rows = 0;
       while (rs && rs->next()) {
          ++rows;
       }
       // the table holds three rows but cannot be read right now
-      std::printf("rows seen: %d (the table holds 3), lastErrorCode on the reader: %d\n",
-                  rows, b.lastErrorCode());
-      rs.reset();
-      a.rollback();
+      checkLong("no rows were returned", 0, rows);
+      check("but the result set does not claim the data is exhausted",
+            rs && rs->status() != DBResultSetStatus::Done);
+      check("it says it failed", rs && rs->status() == DBResultSetStatus::Error);
+      checkLong("because the database is busy", SQLITE_BUSY, rs ? rs->lastErrorCode() : -1);
+
+      check("rollback", a.rollback());
+      std::unique_ptr<DBResultSet> again(b.executeQuery("select id from t"));
+      rows = 0;
+      while (again && again->next()) {
+         ++rows;
+      }
+      checkLong("the same query succeeds once the lock is gone", 3, rows);
+      check("and ends normally", again && again->status() == DBResultSetStatus::Done);
+   };
+
+   // ===================== the busy timeout, and other operations under contention =====================
+
+   s["busy_zero_timeout_fails_at_once"] = [] {
+      SQLiteDatabase a(g_path);
+      openDb(a);
+      check("exclusive transaction", a.beginTransaction());
+      SQLiteDatabase b(g_path);
+      check("second connection opens", b.open());
+      b.setBusyRetryTimeout(0);
+      checkLong("the timeout reads back as 0", 0, b.busyRetryTimeout());
+
+      const long long start = nowMs();
+      std::unique_ptr<DBResultSet> rs(b.executeQuery("select * from t"));
+      const long long waited = nowMs() - start;
+      check("the query fails", rs == nullptr);
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, b.lastErrorCode());
+      check("without waiting (under 2 s; the default would wait 5 s)", waited < 2000);
+
+      check("a transaction does not wait either", !b.beginTransaction());
+      check("rollback", a.rollback());
+   };
+
+   s["busy_positive_timeout_waits_then_fails"] = [] {
+      SQLiteDatabase a(g_path);
+      openDb(a);
+      check("exclusive transaction", a.beginTransaction());
+      SQLiteDatabase b(g_path);
+      check("second connection opens", b.open());
+      b.setBusyRetryTimeout(300);
+      checkLong("the timeout reads back as 300", 300, b.busyRetryTimeout());
+
+      const long long start = nowMs();
+      std::unique_ptr<DBResultSet> rs(b.executeQuery("select * from t"));
+      const long long waited = nowMs() - start;
+      check("the query fails", rs == nullptr);
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, b.lastErrorCode());
+      check("after waiting for the lock (at least 150 ms of the 300)", waited >= 150);
+      check("and not for long (under 4 s)", waited < 4000);
+      check("rollback", a.rollback());
+   };
+
+   s["busy_timeout_before_and_after_open"] = [] {
+      SQLiteDatabase a(g_path);
+      openDb(a);
+      check("exclusive transaction", a.beginTransaction());
+
+      // set before open(): applied when the connection is opened
+      SQLiteDatabase b(g_path);
+      b.setBusyRetryTimeout(300);
+      check("second connection opens", b.open());
+      long long start = nowMs();
+      std::unique_ptr<DBResultSet> rs(b.executeQuery("select * from t"));
+      long long waited = nowMs() - start;
+      check("set before open: the query fails", rs == nullptr);
+      check("set before open: it waited (at least 150 ms)", waited >= 150);
+      check("set before open: and not for long", waited < 4000);
+
+      // changed after open(): takes effect at once
+      b.setBusyRetryTimeout(0);
+      start = nowMs();
+      rs.reset(b.executeQuery("select * from t"));
+      waited = nowMs() - start;
+      check("changed to 0 after open: the query fails", rs == nullptr);
+      check("changed to 0 after open: without waiting", waited < 2000);
+
+      b.setBusyRetryTimeout(400);
+      start = nowMs();
+      rs.reset(b.executeQuery("select * from t"));
+      waited = nowMs() - start;
+      check("changed to 400 after open: the query fails", rs == nullptr);
+      check("changed to 400 after open: it waited (at least 200 ms)", waited >= 200);
+
+      // and a closed and reopened connection keeps the setting
+      b.close();
+      check("reopen", b.open());
+      checkLong("the timeout survives close() and open()", 400, b.busyRetryTimeout());
+      start = nowMs();
+      rs.reset(b.executeQuery("select * from t"));
+      waited = nowMs() - start;
+      check("after reopening: the query fails", rs == nullptr);
+      check("after reopening: it waited (at least 200 ms)", waited >= 200);
+      check("rollback", a.rollback());
+   };
+
+   s["busy_update_fails_then_recovers"] = [] {
+      SQLiteDatabase a(g_path);
+      openDb(a);
+      SQLiteDatabase b(g_path);
+      check("second connection opens", b.open());
+      b.setBusyRetryTimeout(200);
+      unsigned long n = 0;
+      DBStatementArgs first;
+      first.add(new DBLong(1));
+      first.add(new DBString("one"));
+      check("an insert works while nothing is locked",
+            b.executeUpdate("insert into t(id,v) values (?,?)", first, n));
+
+      check("exclusive transaction on the other connection", a.beginTransaction());
+      DBStatementArgs blocked;
+      blocked.add(new DBLong(2));
+      blocked.add(new DBString("two"));
+      const long long start = nowMs();
+      check("the same insert fails while the other connection holds the lock",
+            !b.executeUpdate("insert into t(id,v) values (?,?)", blocked, n));
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, b.lastErrorCode());
+      check("after waiting a little", nowMs() - start >= 100);
+      checkLong("and reports no affected rows", 0, static_cast<long long>(n));
+
+      check("rollback", a.rollback());
+      DBStatementArgs retry;
+      retry.add(new DBLong(2));
+      retry.add(new DBString("two"));
+      check("the same statement works once the lock is gone",
+            b.executeUpdate("insert into t(id,v) values (?,?)", retry, n));
+      checkLong("exactly the two successful inserts are stored", 2,
+                scalar(b, "select count(*) from t"));
+   };
+
+   s["busy_close_under_contention"] = [] {
+      SQLiteDatabase a(g_path);
+      openDb(a);
+      insert3(a);
+      SQLiteDatabase b(g_path);
+      check("second connection opens", b.open());
+      {
+         std::unique_ptr<DBResultSet> warm(b.executeQuery("select id from t"));
+         check("b has a cached statement", warm != nullptr);
+      }
+      check("exclusive transaction on a", a.beginTransaction());
+
+      // closing the connection that is locked out neither waits nor hangs
+      const long long start = nowMs();
+      b.close();
+      check("b closes at once, however busy the database is", nowMs() - start < 2000);
+      check("and really closed", b.sqliteHandle() == nullptr);
+
+      // closing the connection that holds the lock, with a result set active,
+      // gives the lock up
+      std::unique_ptr<DBResultSet> rs(a.executeQuery("select id from t"));
+      check("a result set is active on a", rs && rs->next());
+      a.close();
+      check("a closes", a.sqliteHandle() == nullptr);
+      check("its result set is Invalidated, not Done",
+            rs && rs->status() == DBResultSetStatus::Invalidated);
+      check("the rolled-back transaction released the lock: b reopens and reads",
+            b.open() && scalar(b, "select count(*) from t") == 3);
+   };
+
+   // the messages printed when sqlite3_step() fails: SQLite's own code and
+   // message, never "Unknown error" for a code SQLite defines (checked by the
+   // MATCH / REJECT patterns of the regression case)
+   s["diagnostics_step_error_messages"] = [] {
+      SQLiteDatabase db(g_path);
+      db.setLogsErrors(false);
+      openDb(db);
+      unsigned long n = 0;
+      check("first row", db.executeUpdate("insert into t(id,v) values (1,'a')", n));
+
+      check("a duplicate key through executeUpdate(sql) fails",
+            !db.executeUpdate("insert into t(id,v) values (1,'dup')", n));
+      DBStatementArgs args;
+      args.add(new DBLong(1));
+      args.add(new DBString("dup"));
+      check("and through executeUpdate(sql, args)",
+            !db.executeUpdate("insert into t(id,v) values (?,?)", args, n));
+      checkLong("the error code is the constraint code", SQLITE_CONSTRAINT, db.lastErrorCode() & 0xff);
+
+      std::unique_ptr<DBResultSet> dup(db.executeQuery("insert into t(id,v) values (1,'dup')"));
+      check("a duplicate key through a result set fails", dup && !dup->next());
+      check("the result set reports it", dup && dup->status() == DBResultSetStatus::Error);
+      std::unique_ptr<DBResultSet> overflow(
+         db.executeQuery("select abs(-9223372036854775807 - 1)"));
+      check("an SQL runtime error through a result set fails", overflow && !overflow->next());
+
+      // a busy database is reported as busy
+      SQLiteDatabase locker(g_path);
+      check("a second connection opens", locker.open());
+      check("it takes the exclusive lock", locker.beginTransaction());
+      db.setBusyRetryTimeout(100);
+      check("an update that cannot get the lock fails",
+            !db.executeUpdate("insert into t(id,v) values (2,'b')", n));
+      checkLong("with SQLITE_BUSY", SQLITE_BUSY, db.lastErrorCode());
+      check("rollback", locker.rollback());
    };
 
    return s;

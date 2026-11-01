@@ -115,6 +115,9 @@ void TestSQLiteFoundation::runTests() {
    test_schema_change_repeated();
    test_schema_change_then_constraint_error();
    test_schema_change_with_independent_cursors();
+   test_busy_timeout_configuration();
+   test_result_set_status_transitions();
+   test_close_with_unfinalized_statement();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -1908,4 +1911,250 @@ void TestSQLiteFoundation::test_schema_change_with_independent_cursors() {
    requireLongEquals(1, scalar(db, "select count(*) from pragma_table_info('items') where name = 'x2'"),
                      "the schema really changed three times");
    db.close();
+}
+
+// ---- busy timeout and result-set status (CH-07, CH-08) ---------------------
+
+void TestSQLiteFoundation::test_busy_timeout_configuration() {
+   TEST_CASE("test_busy_timeout_configuration");
+   chapeau_tests::ScopedTempDir dir;
+
+   // PRAGMA busy_timeout reports what SQLite itself has in force (milliseconds)
+   const auto sqliteTimeout = [](SQLiteDatabase& d) {
+      return scalar(d, "pragma busy_timeout", -1);
+   };
+
+   requireLongEquals(5000, SQLiteDatabase::DEFAULT_BUSY_TIMEOUT_MS, "the default is 5000 ms");
+
+   SQLiteDatabase db(dir.file("busy_config.sqlite3"));
+   requireLongEquals(5000, db.busyRetryTimeout(), "a new database reports the default");
+   require(db.open(), "open");
+   requireLongEquals(5000, db.busyRetryTimeout(), "still the default once open");
+   requireLongEquals(5000, sqliteTimeout(db), "and SQLite has it: 5000 ms");
+
+   db.setBusyRetryTimeout(250);
+   requireLongEquals(250, db.busyRetryTimeout(), "a positive value reads back");
+   requireLongEquals(250, sqliteTimeout(db), "and takes effect on the open connection");
+
+   db.setBusyRetryTimeout(0);
+   requireLongEquals(0, db.busyRetryTimeout(), "zero reads back");
+   requireLongEquals(0, sqliteTimeout(db), "and means no waiting in SQLite");
+
+   db.setBusyRetryTimeout(-5);
+   requireLongEquals(0, db.busyRetryTimeout(), "a negative value is treated as zero");
+   requireLongEquals(0, sqliteTimeout(db), "also in SQLite");
+
+   db.setBusyRetryTimeout(1234);
+   requireLongEquals(1234, sqliteTimeout(db), "and it can be raised again");
+
+   // set while closed: kept, and applied when the connection is opened
+   db.close();
+   db.setBusyRetryTimeout(77);
+   requireLongEquals(77, db.busyRetryTimeout(), "set on a closed database");
+   require(db.open(), "reopen");
+   requireLongEquals(77, sqliteTimeout(db), "applied by open()");
+   db.close();
+   require(db.open(), "reopen again");
+   requireLongEquals(77, sqliteTimeout(db), "kept across close() and open()");
+   db.close();
+
+   // set before the first open()
+   SQLiteDatabase other(dir.file("busy_config2.sqlite3"));
+   other.setBusyRetryTimeout(321);
+   require(other.open(), "open the second database");
+   requireLongEquals(321, other.busyRetryTimeout(), "set before open() reads back");
+   requireLongEquals(321, sqliteTimeout(other), "set before open() is applied by open()");
+
+   // a second connection to the same file has its own timeout
+   SQLiteDatabase third(dir.file("busy_config2.sqlite3"));
+   require(third.open(), "a second connection");
+   requireLongEquals(5000, sqliteTimeout(third), "which starts at the default");
+   requireLongEquals(321, sqliteTimeout(other), "without changing the first");
+   other.close();
+   third.close();
+}
+
+void TestSQLiteFoundation::test_result_set_status_transitions() {
+   TEST_CASE("test_result_set_status_transitions");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("status.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      {
+         // Ready -> Row -> Row -> Row -> Done, through the base-class interface
+         unique_ptr<DBResultSet> rs(db.executeQuery(ITEMS_BY_ID));
+         require(rs != nullptr, when + ": a result set");
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Ready, when + ": new result set is Ready");
+            requireLongEquals(0, rs->lastErrorCode(), when + ": with no error");
+            for (int row = 1; row <= 3; ++row) {
+               require(rs->next(), when + ": row " + to_string(row));
+               require(rs->status() == DBResultSetStatus::Row, when + ": status Row");
+               requireLongEquals(0, rs->lastErrorCode(), when + ": no error on a row");
+            }
+            require(!rs->next(), when + ": exhaustion");
+            require(rs->status() == DBResultSetStatus::Done, when + ": status Done");
+            requireLongEquals(0, rs->lastErrorCode(), when + ": exhaustion is not an error");
+            for (int again = 0; again < 3; ++again) {
+               require(!rs->next(), when + ": next() after exhaustion is false");
+               require(rs->status() == DBResultSetStatus::Done, when + ": and stays Done");
+            }
+            rs->close();
+            require(rs->status() == DBResultSetStatus::Done, when + ": close() after Done keeps Done");
+         }
+      }
+
+      {
+         // explicit close(): before any step, and part way through
+         unique_ptr<DBResultSet> unused(db.executeQuery(ITEMS_BY_ID));
+         require(unused != nullptr, when + ": a result set to close unused");
+         if (unused) {
+            unused->close();
+            require(unused->status() == DBResultSetStatus::Done, when + ": closed while Ready: Done");
+            require(!unused->next(), when + ": next() is false after close()");
+         }
+         unique_ptr<DBResultSet> half(db.executeQuery(ITEMS_BY_ID));
+         require(half && half->next(), when + ": a row");
+         if (half) {
+            half->close();
+            half->close();
+            require(half->status() == DBResultSetStatus::Done, when + ": closed while Row: Done");
+            requireLongEquals(0, half->lastErrorCode(), when + ": close() is not an error");
+            require(!half->next(), when + ": next() is false after close()");
+            require(half->status() == DBResultSetStatus::Done, when + ": and still Done");
+         }
+      }
+
+      {
+         // a failure: Error, with SQLite's own code, kept after the statement is released
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select abs(-9223372036854775807 - 1)"));
+         require(rs != nullptr, when + ": a result set that will fail");
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Ready, when + ": Ready before the failing step");
+            require(!rs->next(), when + ": the failing step returns false");
+            require(rs->status() == DBResultSetStatus::Error, when + ": status Error, not Done");
+            requireLongEquals(SQLITE_ERROR, rs->lastErrorCode(), when + ": SQLite's code");
+            require(rs->statement() == nullptr, when + ": the statement has been released");
+            for (int again = 0; again < 3; ++again) {
+               require(!rs->next(), when + ": next() after an error is false");
+               require(rs->status() == DBResultSetStatus::Error, when + ": and stays Error");
+               requireLongEquals(SQLITE_ERROR, rs->lastErrorCode(), when + ": with the code kept");
+            }
+            rs->close();
+            require(rs->status() == DBResultSetStatus::Error, when + ": close() does not hide the error");
+            requireLongEquals(SQLITE_ERROR, rs->lastErrorCode(), when + ": nor its code");
+            requireLongEquals(0, rs->getColumnCount(), when + ": accessors stay safe after an error");
+            requireLongEquals(0, rs->longForColumnIndex(0), when + ": all of them");
+         }
+      }
+
+      {
+         // a specific code: a constraint failure surfaces as itself, not as SQLITE_ERROR
+         unique_ptr<DBResultSet> rs(
+            db.executeQuery("insert into items(id,name) values (1,'duplicate')"));
+         require(rs != nullptr, when + ": a lazy insert");
+         if (rs) {
+            require(!rs->next(), when + ": the duplicate key stops it");
+            require(rs->status() == DBResultSetStatus::Error, when + ": status Error");
+            requireLongEquals(SQLITE_CONSTRAINT, rs->lastErrorCode() & 0xff,
+                              when + ": a constraint error");
+         }
+         // a statement that succeeds is Done, not Error
+         unique_ptr<DBResultSet> ok(
+            db.executeQuery("insert into items(id,name) values (50,'fifty')"));
+         require(ok && !ok->next(), when + ": a lazy insert that works returns false");
+         if (ok) {
+            require(ok->status() == DBResultSetStatus::Done, when + ": and is Done");
+            requireLongEquals(0, ok->lastErrorCode(), when + ": with no error");
+         }
+         requireLongEquals(1, scalar(db, "select count(*) from items where id = 50"),
+                           when + ": the insert ran");
+         require(exec(db, "delete from items where id = 50"), when + ": remove it again");
+      }
+   }
+   db.setShouldCacheStatements(true);
+
+   {
+      // invalidation: only an active result set becomes Invalidated; one that
+      // had ended keeps how it ended
+      unique_ptr<SQLiteResultSet> ready(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> onRow(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> done(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> failed(
+         openCursor(db, "insert into items(id,name) values (1,'duplicate')"));
+      require(ready && onRow && done && failed, "four result sets");
+      if (ready && onRow && done && failed) {
+         require(onRow->next(), "one is on a row");
+         while (done->next()) {
+         }
+         require(!failed->next(), "one has failed");
+
+         db.close();
+
+         require(ready->status() == DBResultSetStatus::Invalidated, "Ready -> Invalidated");
+         require(onRow->status() == DBResultSetStatus::Invalidated, "Row -> Invalidated");
+         require(done->status() == DBResultSetStatus::Done, "Done stays Done");
+         require(failed->status() == DBResultSetStatus::Error, "Error stays Error");
+         requireLongEquals(SQLITE_CONSTRAINT, failed->lastErrorCode() & 0xff,
+                           "and keeps its error code");
+         requireLongEquals(0, ready->lastErrorCode(), "invalidation is not an error");
+         require(!ready->next() && !onRow->next(), "next() on an invalidated result set is false");
+         require(ready->status() == DBResultSetStatus::Invalidated, "and it stays Invalidated");
+         ready->close();
+         require(ready->status() == DBResultSetStatus::Invalidated, "close() does not turn it into Done");
+
+         require(db.open(), "reopen");
+         require(ready->status() == DBResultSetStatus::Invalidated &&
+                 onRow->status() == DBResultSetStatus::Invalidated,
+                 "reopening does not revive them");
+      }
+   }
+
+   {
+      // the database is destroyed first: the status says so, and destroying
+      // the result sets afterwards is safe
+      auto other = make_unique<SQLiteDatabase>(dir.file("status2.sqlite3"));
+      require(other->open() && createItems(*other), "a second database");
+      unique_ptr<SQLiteResultSet> active(openCursor(*other, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> finished(openCursor(*other, ITEMS_BY_ID));
+      require(active && finished && active->next(), "two result sets");
+      if (active && finished) {
+         while (finished->next()) {
+         }
+         other.reset();
+         require(active->status() == DBResultSetStatus::Invalidated,
+                 "destroyed under an active result set: Invalidated");
+         require(finished->status() == DBResultSetStatus::Done,
+                 "destroyed after exhaustion: still Done");
+         require(!active->next() && !finished->next(), "no more rows from either");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_close_with_unfinalized_statement() {
+   TEST_CASE("test_close_with_unfinalized_statement");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("close_unfinalized.sqlite3"));
+   require(db.open(), "open");
+
+   // a statement prepared behind Chapeau's back is one close() cannot finalize:
+   // sqlite3_close() refuses while it exists. close() must neither wait for
+   // that to change nor leak the connection.
+   sqlite3_stmt* raw = nullptr;
+   require(sqlite3_prepare_v2(db.sqliteHandle(), "select 1", -1, &raw, nullptr) == SQLITE_OK,
+           "prepare a statement directly on the connection");
+   db.close();
+   require(db.sqliteHandle() == nullptr, "close() returns, and the database is closed");
+
+   // finalizing the last statement lets SQLite free the connection
+   // (the leak check of a sanitizer build would notice if it did not)
+   require(sqlite3_finalize(raw) == SQLITE_OK, "finalize the statement afterwards");
 }

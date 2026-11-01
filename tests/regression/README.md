@@ -29,16 +29,15 @@ and left files behind fails the case.
 this against a helper that deliberately succeeds, exits 3, aborts, dies of
 SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
 
-## Three sets of scenarios
+## Sets of scenarios
 
 * **Default test set** (always registered): `harness_selfcheck` and the
   `regression_control_*` cases — behaviour that works today, run in isolated
   processes. Labels `harness` and `regression`.
 * **Known defects** (`ch<nn>_*` in `chapeau_probe.cpp`, listed in
   `CHAPEAU_DEFECT_TABLE` in `known_defects.cmake`): reproductions of the H1a
-  defects that are not fixed yet (the busy-wait cases of CH-07). Scenarios whose defect has been
-  fixed (CH-01 … CH-06, and the two CH-07 cases that were the same lifetime
-  problem) are in `CHAPEAU_FIXED_TABLE` and run in the default set as
+  defects that are not fixed yet. There are none left: every investigated critical
+  defect (CH-01 … CH-08) is fixed, and its scenarios are in `CHAPEAU_FIXED_TABLE` and run in the default set as
   `regression_ch…` cases. Each unfixed scenario asserts what a *fixed* Chapeau
   does, so it fails today; these are **not** in the default set and not part of
   normal CI. Enable them with
@@ -53,9 +52,10 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
 
   When a defect is fixed, move its line from `CHAPEAU_DEFECT_TABLE` to
   `CHAPEAU_FIXED_TABLE` in `known_defects.cmake`; it then runs in the default set.
-* **Characterization** (`characterize_*`): prints today's behaviour without
-  asserting anything. Used for CH-08, which needs an error-reporting API before
-  a test can say what is correct.
+* **Busy-timeout scenarios** (`busy_*` in `chapeau_probe.cpp`): how the busy
+  timeout behaves and what a locked database does to queries, updates,
+  transactions and `close()`. They wait for a lock on purpose, so they run in
+  bounded subprocesses (default set, label `regression`).
 
 ## Seeing the defects
 

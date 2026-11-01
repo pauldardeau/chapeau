@@ -1,7 +1,6 @@
 //SQLiteDatabase.cpp
 
 #include <stdio.h>
-#include <unistd.h>
 #include <assert.h>
 
 #include "SQLiteDatabase.h"
@@ -52,7 +51,7 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
    m_inTransaction(false),
    m_traceExecution(false),
    m_checkedOut(false),
-   m_busyRetryTimeout(0) {
+   m_busyRetryTimeout(DEFAULT_BUSY_TIMEOUT_MS) {
 }
 
 //******************************************************************************
@@ -91,7 +90,65 @@ bool SQLiteDatabase::open() {
       return false;
    }
 
+   // the timeout set so far (the default, or what the caller chose before
+   // opening) takes effect on the new connection
+   ::sqlite3_busy_timeout(m_db, m_busyRetryTimeout);
+
    return true;
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::prepareStatement(const std::string& sql,
+                                      sqlite3_stmt** ppStmt) {
+   // a prepare that has to read the schema needs a lock, and waits for it as
+   // long as the busy timeout allows
+   const int rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, ppStmt, 0);
+
+   if (SQLITE_OK == rc) {
+      return true;
+   }
+
+   ::sqlite3_finalize(*ppStmt);
+   *ppStmt = nullptr;
+
+   if (SQLITE_BUSY == rc) {
+      ::printf("Database busy (%s): could not prepare the statement within %d ms\n",
+               m_databasePath.c_str(),
+               m_busyRetryTimeout);
+      Logger::warning("Database busy");
+   } else if (m_logsErrors) {
+      ::printf("DB Error: %d \"%s\"\n",
+               lastErrorCode(),
+               lastErrorMessage().c_str());
+      ::printf("DB Query: %s\n", sql.c_str());
+   }
+
+   return false;
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::reportStepError(const char* where,
+                                      int rc,
+                                      const std::string& sql) {
+   if (SQLITE_BUSY == rc) {
+      ::printf("Database busy (%s): %s gave up after waiting %d ms for the lock\n",
+               m_databasePath.c_str(),
+               where,
+               m_busyRetryTimeout);
+      Logger::warning("Database busy");
+   } else {
+      // whatever SQLite returned, with its own explanation of it
+      ::printf("Error calling sqlite3_step in %s (%d: %s)\n",
+               where,
+               rc,
+               ::sqlite3_errmsg(m_db));
+   }
+
+   if (!sql.empty()) {
+      ::printf("DB Query: %s\n", sql.c_str());
+   }
 }
 
 //******************************************************************************
@@ -163,24 +220,20 @@ void SQLiteDatabase::close() {
       return;
    }
 
-   int rc;
-   bool retry;
-   int numberOfRetries = 0;
-   do {
-      retry = false;
-      rc = ::sqlite3_close(m_db);
-      if (SQLITE_BUSY == rc) {
-         retry = true;
-         usleep(20);
-         if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-            ::printf("%s:%d\n", __FUNCTION__, __LINE__);
-            Logger::warning("Database busy, unable to close");
-            return;
-         }
-      } else if (SQLITE_OK != rc) {
-         ::printf("error closing!: %d\n", rc);
-      }
-   } while (retry);
+   // sqlite3_close() does not wait for locks held by other connections; it
+   // is refused (SQLITE_BUSY) only while a statement is still unfinalized,
+   // and every statement of ours was finalized above. Should one be left,
+   // sqlite3_close_v2() lets the connection go anyway and frees it as soon as
+   // that statement is finalized, instead of waiting for something that never
+   // happens.
+   int rc = ::sqlite3_close(m_db);
+   if (SQLITE_BUSY == rc) {
+      Logger::warning("Database busy, closing with unfinalized statements");
+      rc = ::sqlite3_close_v2(m_db);
+   }
+   if (SQLITE_OK != rc) {
+      ::printf("error closing!: %d\n", rc);
+   }
 
    m_db = nullptr;
 }
@@ -414,7 +467,6 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
    MarkInUse inuse(this);
 
-   int rc = 0;
    sqlite3_stmt* pStmt = nullptr;
    SQLiteStatement* statement = nullptr;
 
@@ -436,42 +488,10 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
    const bool cacheThis = cacheStatements && !slotTaken;
 
-   int numberOfRetries = 0;
-   bool retry = false;
-
    if (!pStmt) {
-      do {
-         retry = false;
-         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
-
-         if (SQLITE_BUSY == rc) {
-            retry = true;
-            usleep(20);
-
-            if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-               ::printf("%s:%d Database busy (%s)\n",
-                        __FUNCTION__,
-                        __LINE__,
-                        m_databasePath.c_str());
-               Logger::warning("Database busy");
-               ::sqlite3_finalize(pStmt);
-               return nullptr;
-            }
-         } else if (SQLITE_OK != rc) {
-            ::sqlite3_finalize(pStmt);
-
-            if (m_logsErrors) {
-               ::printf("DB Error: %d \"%s\"\n",
-                        lastErrorCode(),
-                        lastErrorMessage().c_str());
-               ::printf("DB Query: %s\n", sql.c_str());
-               if (m_crashOnErrors) {
-               }
-            }
-
-            return nullptr;
-         }
-      } while (retry);
+      if (!prepareStatement(sql, &pStmt)) {
+         return nullptr;
+      }
    }
 
    const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
@@ -517,7 +537,6 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    MarkInUse inUse(this);
 
-   int rc = 0;
    sqlite3_stmt* pStmt = nullptr;
    SQLiteStatement* statement = nullptr;
 
@@ -541,42 +560,10 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    const bool cacheThis = cacheStatements && !slotTaken;
 
-   int numberOfRetries = 0;
-   bool retry = false;
-
    if (!pStmt) {
-      do {
-         retry = false;
-         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
-
-         if (SQLITE_BUSY == rc) {
-            retry = true;
-            usleep(20);
-
-            if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-               ::printf("%s:%d Database busy (%s)\n",
-                        __FUNCTION__,
-                        __LINE__,
-                        m_databasePath.c_str());
-               Logger::warning("Database busy");
-               ::sqlite3_finalize(pStmt);
-               return nullptr;
-            }
-         } else if (SQLITE_OK != rc) {
-            ::sqlite3_finalize(pStmt);
-
-            if (m_logsErrors) {
-               ::printf("DB Error: %d \"%s\"\n",
-                        lastErrorCode(),
-                        lastErrorMessage().c_str());
-               ::printf("DB Query: %s\n", sql.c_str());
-               if (m_crashOnErrors) {
-               }
-            }
-
-            return nullptr;
-         }
-      } while (retry);
+      if (!prepareStatement(sql, &pStmt)) {
+         return nullptr;
+      }
    }
 
    const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
@@ -681,44 +668,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    const bool cacheThis = cacheStatements && !slotTaken;
 
-   int numberOfRetries = 0;
-   bool retry = false;
-
    if (!pStmt) {
-      do {
-         retry = false;
-         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
-         if (SQLITE_BUSY == rc) {
-            retry = true;
-            usleep(20);
-
-            if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-               ::printf("%s:%d Database busy (%s)\n",
-                        __FUNCTION__,
-                        __LINE__,
-                        m_databasePath.c_str());
-               Logger::warning("Database busy");
-               ::sqlite3_finalize(pStmt);
-               rowsAffectedCount = 0L;
-               return false;
-            }
-         } else if (SQLITE_OK != rc) {
-            ::sqlite3_finalize(pStmt);
-
-            if (m_logsErrors) {
-               ::printf("DB Error: %d \"%s\"\n",
-                        lastErrorCode(),
-                        lastErrorMessage().c_str());
-               ::printf("DB Query: %s\n", sql.c_str());
-               if (m_crashOnErrors) {
-               }
-            }
-
-            rowsAffectedCount = 0L;
-
-            return false;
-         }
-      } while (retry);
+      if (!prepareStatement(sql, &pStmt)) {
+         rowsAffectedCount = 0L;
+         return false;
+      }
    }
 
    const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
@@ -739,44 +693,14 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    /* Call sqlite3_step() to run the virtual machine. Since the SQL being
     ** executed is not a SELECT statement, we assume no data will be returned.
     */
-   numberOfRetries = 0;
-   do {
-      rc = ::sqlite3_step(pStmt);
-      retry = false;
+   // sqlite3_step() waits for a lock for as long as the busy timeout allows
+   // (see setBusyRetryTimeout) and then fails with SQLITE_BUSY like any
+   // other error
+   rc = ::sqlite3_step(pStmt);
 
-      if (SQLITE_BUSY == rc) {
-         // this will happen if the db is locked, like if we are doing an update or insert.
-         // in that case, retry the step... and maybe wait just 10 milliseconds.
-         retry = true;
-         usleep(20);
-
-         if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-            ::printf("%s:%d Database busy (%s)\n",
-                     __FUNCTION__,
-                     __LINE__,
-                     m_databasePath.c_str());
-            Logger::warning("Database busy");
-            retry = false;
-         }
-      } else if (SQLITE_DONE == rc || SQLITE_ROW == rc) {
-         // all is well, let's return.
-      } else if (SQLITE_ERROR == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) SQLITE_ERROR\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      } else if (SQLITE_MISUSE == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) SQLITE_MISUSE\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      } else {
-         ::printf("Unknown error calling sqlite3_step (%d: %s) eu\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      }
-   } while (retry);
+   if (SQLITE_DONE != rc && SQLITE_ROW != rc) {
+      reportStepError("executeUpdate", rc, sql);
+   }
 
    assert(rc != SQLITE_ROW);
 
@@ -848,43 +772,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    const bool cacheThis = cacheStatements && !slotTaken;
 
-   int numberOfRetries = 0;
-   bool retry = false;
-
    if (!pStmt) {
-      do {
-         retry = false;
-         rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, &pStmt, 0);
-         if (SQLITE_BUSY == rc) {
-            retry = true;
-            usleep(20);
-
-            if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-               ::printf("%s:%d Database busy (%s)\n",
-                        __FUNCTION__,
-                        __LINE__,
-                        m_databasePath.c_str());
-               Logger::warning("Database busy");
-               ::sqlite3_finalize(pStmt);
-               affectedRowsCount = 0L;
-               return false;
-            }
-         } else if (SQLITE_OK != rc) {
-            ::sqlite3_finalize(pStmt);
-
-            if (m_logsErrors) {
-               ::printf("DB Error: %d \"%s\"\n",
-                        lastErrorCode(),
-                        lastErrorMessage().c_str());
-               ::printf("DB Query: %s\n", sql.c_str());
-               if (m_crashOnErrors) {
-               }
-            }
-            affectedRowsCount = 0L;
-
-            return false;
-         }
-      } while (retry);
+      if (!prepareStatement(sql, &pStmt)) {
+         affectedRowsCount = 0L;
+         return false;
+      }
    }
 
    const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
@@ -948,44 +840,14 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    /* Call sqlite3_step() to run the virtual machine. Since the SQL being
     ** executed is not a SELECT statement, we assume no data will be returned.
     */
-   numberOfRetries = 0;
-   do {
-      rc = ::sqlite3_step(pStmt);
-      retry = false;
+   // sqlite3_step() waits for a lock for as long as the busy timeout allows
+   // (see setBusyRetryTimeout) and then fails with SQLITE_BUSY like any
+   // other error
+   rc = ::sqlite3_step(pStmt);
 
-      if (SQLITE_BUSY == rc) {
-         // this will happen if the db is locked, like if we are doing an update or insert.
-         // in that case, retry the step... and maybe wait just 10 milliseconds.
-         retry = true;
-         usleep(20);
-
-         if (m_busyRetryTimeout && (numberOfRetries++ > m_busyRetryTimeout)) {
-            ::printf("%s:%d Database busy (%s)\n",
-                     __FUNCTION__,
-                     __LINE__,
-                     m_databasePath.c_str());
-            Logger::warning("Database busy");
-            retry = false;
-         }
-      } else if (SQLITE_DONE == rc || SQLITE_ROW == rc) {
-         // all is well, let's return.
-      } else if (SQLITE_ERROR == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) SQLITE_ERROR\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      } else if (SQLITE_MISUSE == rc) {
-         ::printf("Error calling sqlite3_step (%d: %s) SQLITE_MISUSE\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      } else {
-         ::printf("Unknown error calling sqlite3_step (%d: %s) eu\n",
-                  rc,
-                  ::sqlite3_errmsg(m_db));
-         ::printf("DB Query: %s\n", sql.c_str());
-      }
-   } while (retry);
+   if (SQLITE_DONE != rc && SQLITE_ROW != rc) {
+      reportStepError("executeUpdate", rc, sql);
+   }
 
    assert(rc != SQLITE_ROW);
 
@@ -1146,7 +1008,13 @@ int SQLiteDatabase::busyRetryTimeout() {
 //******************************************************************************
 
 void SQLiteDatabase::setBusyRetryTimeout(int busyRetryTimeout) {
-   m_busyRetryTimeout = busyRetryTimeout;
+   m_busyRetryTimeout = (busyRetryTimeout > 0) ? busyRetryTimeout : 0;
+
+   // on an open connection the new value takes effect at once; otherwise
+   // open() applies it
+   if (m_db != nullptr) {
+      ::sqlite3_busy_timeout(m_db, m_busyRetryTimeout);
+   }
 }
 
 //******************************************************************************
