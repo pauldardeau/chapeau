@@ -37,7 +37,7 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
 * **Known defects** (`ch<nn>_*` in `chapeau_probe.cpp`, listed in
   `CHAPEAU_DEFECT_TABLE` in `known_defects.cmake`): reproductions of the H1a
   defects that are not fixed yet. There are none left: every investigated critical
-  defect (CH-01 … CH-08) is fixed, and its scenarios are in `CHAPEAU_FIXED_TABLE` and run in the default set as
+  defect (CH-01 … CH-08 and CH-11 … CH-13) is fixed, and its scenarios are in `CHAPEAU_FIXED_TABLE` and run in the default set as
   `regression_ch…` cases. Each unfixed scenario asserts what a *fixed* Chapeau
   does, so it fails today; these are **not** in the default set and not part of
   normal CI. Enable them with

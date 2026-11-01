@@ -17,6 +17,7 @@ using namespace chapeau;
 //******************************************************************************
 
 Database::Database() :
+   m_statementCacheLimit(DEFAULT_STATEMENT_CACHE_LIMIT),
    m_shouldCacheStatements(true) {
 }
 
@@ -151,7 +152,7 @@ bool Database::bind(const DBDate* date,
 //******************************************************************************
 
 bool Database::shouldCacheStatements() const {
-   return m_shouldCacheStatements;
+   return m_shouldCacheStatements && m_statementCacheLimit > 0;
 }
 
 //******************************************************************************
@@ -166,13 +167,33 @@ void Database::setShouldCacheStatements(bool value) {
 
 //******************************************************************************
 
+std::size_t Database::statementCacheLimit() const {
+   return m_statementCacheLimit;
+}
+
+//******************************************************************************
+
+void Database::setStatementCacheLimit(std::size_t limit) {
+   m_statementCacheLimit = limit;
+
+   if (limit == 0) {
+      clearCachedStatements();
+   } else {
+      evictLeastRecentlyUsed(limit);
+   }
+}
+
+//******************************************************************************
+
 DBStatement* Database::cachedStatementForQuery(const std::string& query) {
-   map<string,DBStatement*>::iterator it = m_cachedStatements.find(query);
-   if (it != m_cachedStatements.end()) {
-      return (*it).second;
+   const auto it = m_cachedStatements.find(query);
+   if (it == m_cachedStatements.end()) {
+      return nullptr;
    }
 
-   return nullptr;
+   // looked up for an execution: now the most recently used
+   m_cacheOrder.splice(m_cacheOrder.begin(), m_cacheOrder, it->second.position);
+   return it->second.statement;
 }
 
 //******************************************************************************
@@ -180,7 +201,45 @@ DBStatement* Database::cachedStatementForQuery(const std::string& query) {
 void Database::setCachedStatement(DBStatement* statement,
                                   const std::string& query) {
    statement->setQuery(query);
-   m_cachedStatements[query] = statement;
+
+   // a statement already cached for this SQL is replaced; it is handed to
+   // discardCachedStatement() like any other statement that leaves the cache
+   DBStatement* replaced = nullptr;
+   const auto existing = m_cachedStatements.find(query);
+   if (existing != m_cachedStatements.end()) {
+      replaced = existing->second.statement;
+      m_cacheOrder.erase(existing->second.position);
+      m_cachedStatements.erase(existing);
+   }
+
+   m_cacheOrder.push_front(query);
+   m_cachedStatements[query] = CacheEntry{statement, m_cacheOrder.begin()};
+
+   if (replaced != nullptr && replaced != statement) {
+      discardCachedStatement(replaced);
+   }
+
+   // the statement just added is the most recently used and is never the one
+   // evicted, so the cache keeps at least it
+   evictLeastRecentlyUsed(m_statementCacheLimit > 0 ? m_statementCacheLimit : 1);
+}
+
+//******************************************************************************
+
+void Database::evictLeastRecentlyUsed(std::size_t keep) {
+   while (m_cachedStatements.size() > keep && !m_cacheOrder.empty()) {
+      // out of the cache first, then handed on: nothing handed to
+      // discardCachedStatement() is still reachable through the cache
+      const std::string query = m_cacheOrder.back();
+      m_cacheOrder.pop_back();
+
+      const auto it = m_cachedStatements.find(query);
+      if (it != m_cachedStatements.end()) {
+         DBStatement* victim = it->second.statement;
+         m_cachedStatements.erase(it);
+         discardCachedStatement(victim);
+      }
+   }
 }
 
 //******************************************************************************
@@ -188,11 +247,12 @@ void Database::setCachedStatement(DBStatement* statement,
 void Database::clearCachedStatements() {
    // empty the cache first, so that nothing handed to
    // discardCachedStatement() is still reachable through it
-   std::map<std::string, DBStatement*> cached;
+   std::map<std::string, CacheEntry> cached;
    cached.swap(m_cachedStatements);
+   m_cacheOrder.clear();
 
    for (auto& pair : cached) {
-      discardCachedStatement(pair.second);
+      discardCachedStatement(pair.second.statement);
    }
 }
 

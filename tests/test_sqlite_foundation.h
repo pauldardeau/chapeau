@@ -28,6 +28,10 @@ class SQLiteResultSet;
  * update prepared before an ALTER TABLE or CREATE INDEX still works, and sees
  * the new schema, afterwards.
  *
+ * Also covers the transaction state, which comes from SQLite (CH-11), open() on
+ * an open database and a failed open() (CH-12), and the bounded, least recently
+ * used statement cache (CH-13).
+ *
  * Also covers the busy timeout setting (CH-07) and the result-set status and
  * error code (CH-08). Lock contention itself -- which waits on purpose -- is
  * exercised in bounded subprocesses, see tests/regression/.
@@ -69,6 +73,16 @@ protected:
    void test_busy_timeout_configuration();
    void test_result_set_status_transitions();
    void test_close_with_unfinalized_statement();
+   void test_transaction_state_follows_sqlite();
+   void test_open_when_already_open();
+   void test_failed_open_recovers();
+   void test_statement_cache_is_bounded();
+   void test_statement_cache_limit_zero();
+   void test_statement_cache_limit_one();
+   void test_statement_cache_lru_order();
+   void test_statement_cache_eviction_with_active_cursors();
+   void test_statement_cache_lowering_limit_with_active_cursors();
+   void test_statement_cache_cleanup_on_close();
 
    void requireLongEquals(long long expected,
                           long long actual,

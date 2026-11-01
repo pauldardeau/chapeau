@@ -48,10 +48,10 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
    m_logsErrors(false),
    m_crashOnErrors(false),
    m_inUse(false),
-   m_inTransaction(false),
    m_traceExecution(false),
    m_checkedOut(false),
-   m_busyRetryTimeout(DEFAULT_BUSY_TIMEOUT_MS) {
+   m_busyRetryTimeout(DEFAULT_BUSY_TIMEOUT_MS),
+   m_openErrorCode(SQLITE_OK) {
 }
 
 //******************************************************************************
@@ -82,13 +82,33 @@ sqlite3* SQLiteDatabase::sqliteHandle() {
 //******************************************************************************
 
 bool SQLiteDatabase::open() {
+   if (m_db != nullptr) {
+      // already open: whatever is going on on this connection -- result sets,
+      // a transaction, cached statements -- stays exactly as it is
+      Logger::warning("open() on a database that is already open: '" +
+                      m_databasePath + "' (the connection is unchanged)");
+      return false;
+   }
+
    Logger::debug("opening database '" + m_databasePath + "'");
-   const int err = ::sqlite3_open(m_databasePath.c_str(), &m_db);
+   sqlite3* handle = nullptr;
+   const int err = ::sqlite3_open(m_databasePath.c_str(), &handle);
    if (err != SQLITE_OK) {
+      // sqlite3_open hands back a handle even when it fails, and that handle
+      // has to be closed; its reason is kept for lastErrorCode()
+      m_openErrorCode = (handle != nullptr) ? ::sqlite3_errcode(handle) : err;
+      m_openErrorMessage = (handle != nullptr) ? ::sqlite3_errmsg(handle)
+                                               : ::sqlite3_errstr(err);
+      ::sqlite3_close(handle);
+
       Logger::error("unable to open database '" + m_databasePath + "'");
       ::printf("rc=%d\n", err);
       return false;
    }
+
+   m_db = handle;
+   m_openErrorCode = SQLITE_OK;
+   m_openErrorMessage.clear();
 
    // the timeout set so far (the default, or what the caller chose before
    // opening) takes effect on the new connection
@@ -269,6 +289,11 @@ void SQLiteDatabase::complainAboutInUse() {
 //******************************************************************************
 
 std::string SQLiteDatabase::lastErrorMessage() {
+   if (m_db == nullptr) {
+      // no connection to ask: the reason the last open() failed, if it did
+      return m_openErrorMessage.empty() ? std::string("not an error")
+                                        : m_openErrorMessage;
+   }
    return std::string(::sqlite3_errmsg(m_db));
 }
 
@@ -281,6 +306,10 @@ bool SQLiteDatabase::hadError() {
 //******************************************************************************
 
 int SQLiteDatabase::lastErrorCode() {
+   if (m_db == nullptr) {
+      // no connection to ask: the reason the last open() failed, if it did
+      return m_openErrorCode;
+   }
    return ::sqlite3_errcode(m_db);
 }
 
@@ -883,48 +912,32 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
 bool SQLiteDatabase::rollback() {
    unsigned long rowsAffectedCount = 0L;
-   const bool b = executeUpdate("ROLLBACK TRANSACTION;", rowsAffectedCount);
-   if (b) {
-      m_inTransaction = false;
-   }
-
-   return b;
+   // whether a transaction is open afterwards is SQLite's to say, see
+   // inTransaction()
+   return executeUpdate("ROLLBACK TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::commit() {
    unsigned long rowsAffectedCount = 0L;
-   const bool b = executeUpdate("COMMIT TRANSACTION;", rowsAffectedCount);
-   if (b) {
-      m_inTransaction = false;
-   }
-
-   return b;
+   // whether a transaction is open afterwards is SQLite's to say, see
+   // inTransaction()
+   return executeUpdate("COMMIT TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::beginDeferredTransaction() {
    unsigned long rowsAffectedCount = 0L;
-   const bool b = executeUpdate("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
-   if (b) {
-      m_inTransaction = true;
-   }
-
-   return b;
+   return executeUpdate("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::beginTransaction() {
    unsigned long rowsAffectedCount = 0L;
-   const bool b = executeUpdate("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
-   if (b) {
-      m_inTransaction = true;
-   }
-
-   return b;
+   return executeUpdate("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
@@ -954,7 +967,7 @@ void SQLiteDatabase::setCrashOnErrors(bool flag) {
 //******************************************************************************
 
 bool SQLiteDatabase::inUse() {
-   return m_inUse || m_inTransaction;
+   return m_inUse || inTransaction();
 }
 
 //******************************************************************************
@@ -966,13 +979,20 @@ void SQLiteDatabase::setInUse(bool b) {
 //******************************************************************************
 
 bool SQLiteDatabase::inTransaction() {
-   return m_inTransaction;
+   // SQLite knows: it is in autocommit mode exactly when no transaction is
+   // open, however the transaction was begun or ended (a BEGIN or COMMIT run
+   // as plain SQL, a COMMIT that failed busy and left it open, or a
+   // statement that rolled it back). No copy of that is kept here that could
+   // go stale.
+   return (m_db != nullptr) && (::sqlite3_get_autocommit(m_db) == 0);
 }
 
 //******************************************************************************
 
 void SQLiteDatabase::setInTransaction(bool flag) {
-   m_inTransaction = flag;
+   // kept so that existing callers still build; the state of the transaction
+   // is SQLite's, and cannot be set from outside
+   (void) flag;
 }
 
 //******************************************************************************

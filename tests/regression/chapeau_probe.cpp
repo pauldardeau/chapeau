@@ -12,7 +12,7 @@
 //   busy_*      the busy timeout and lock contention (bounded waits, errors,
 //               recovery). Also ordinary regression cases.
 //
-//   ch<nn>_*    reproductions of the H1a defects (CH-01 .. CH-08).
+//   ch<nn>_*    reproductions of the H1a defects (CH-01 .. CH-13).
 //               Each one describes what a fixed Chapeau must do and ends
 //               with exit 0 only then. Today they end in a sanitizer report,
 //               a crash, a hang (killed by the harness) or a failed CHECK.
@@ -720,6 +720,66 @@ std::map<std::string, Scenario> scenarios() {
             rs && rs->status() == DBResultSetStatus::Invalidated);
       check("the rolled-back transaction released the lock: b reopens and reads",
             b.open() && scalar(b, "select count(*) from t") == 3);
+   };
+
+   // ===================== CH-11, CH-12, CH-13 =====================
+
+   s["ch11_in_transaction_follows_external_commit"] = [] {
+      defect("CH-11", "inTransaction() stayed true after the transaction was committed by plain SQL");
+      SQLiteDatabase db(g_path);
+      openDb(db);
+      unsigned long n = 0;
+      check("not in a transaction to begin with", !db.inTransaction());
+      check("begin", db.beginTransaction());
+      check("in a transaction", db.inTransaction());
+      check("COMMIT as plain SQL", db.executeUpdate("COMMIT", n));
+      check("inTransaction() is false afterwards", !db.inTransaction());
+      check("BEGIN as plain SQL", db.executeUpdate("BEGIN", n));
+      check("inTransaction() is true", db.inTransaction());
+      check("ROLLBACK as plain SQL", db.executeUpdate("ROLLBACK", n));
+      check("inTransaction() is false again", !db.inTransaction());
+   };
+
+   s["ch12_open_twice_keeps_one_connection"] = [] {
+      defect("CH-12", "a second open() leaked the first connection, and a failed open() left a handle");
+      SQLiteDatabase db(g_path);
+      openDb(db);
+      sqlite3* const handle = db.sqliteHandle();
+      insert3(db);
+      check("a second open() fails", !db.open());
+      check("and leaves the connection as it was", db.sqliteHandle() == handle);
+      checkLong("which still works", 3, scalar(db, "select count(*) from t"));
+
+      SQLiteDatabase bad(g_path + "-no-such-directory/x.sqlite3");
+      bad.setLogsErrors(false);
+      check("open() of an impossible path fails", !bad.open());
+      check("and leaves no handle behind", bad.sqliteHandle() == nullptr);
+      checkLong("with the reason available", SQLITE_CANTOPEN, bad.lastErrorCode());
+      check("and open() may be tried again", !bad.open());
+   };
+
+   s["ch13_statement_cache_is_bounded"] = [] {
+      defect("CH-13", "the statement cache grew without bound (5003 open statements after 5000 calls)");
+      SQLiteDatabase db(g_path);
+      openDb(db);
+      unsigned long n = 0;
+      check("one transaction for many inserts", db.beginDeferredTransaction());
+      for (int i = 0; i < 5000; ++i) {
+         const std::string sql = "insert into t(id,v) values (" + std::to_string(i + 1) + ",'x')";
+         if (!db.executeUpdate(sql, n)) {
+            check("insert succeeded", false);
+            break;
+         }
+      }
+      check("commit", db.commit());
+      int open = 0;
+      for (sqlite3_stmt* st = sqlite3_next_stmt(db.sqliteHandle(), nullptr); st != nullptr;
+           st = sqlite3_next_stmt(db.sqliteHandle(), st)) {
+         ++open;
+      }
+      std::printf("5000 distinct statements executed once each; statements left open: %d\n", open);
+      check("no more than the cache limit (128) is left open", open <= 128);
+      checkLong("and every insert ran", 5000, scalar(db, "select count(*) from t"));
    };
 
    // the messages printed when sqlite3_step() fails: SQLite's own code and

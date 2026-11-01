@@ -1,6 +1,8 @@
 #ifndef CHAPEAU_DATABASE_H
 #define CHAPEAU_DATABASE_H
 
+#include <cstddef>
+#include <list>
 #include <string>
 #include <vector>
 #include <map>
@@ -345,17 +347,40 @@ public:
                                      const DBStatementArgs& args) = 0;
 
    /**
-    *
-    * @return
+    * Whether statements are being cached: the switch set by
+    * setShouldCacheStatements() is on and statementCacheLimit() is not 0.
     */
    bool shouldCacheStatements() const;
 
    /**
-    *
-    * @param value
-    * @return
+    * Switches statement caching on (the default) or off. Switching it off
+    * empties the cache; a statement a live result set is using is not
+    * finalized, the result set keeps it until it ends. The cache limit is
+    * kept, and applies again when caching is switched back on.
     */
    void setShouldCacheStatements(bool value);
+
+   /**
+    * The most statements the cache keeps. The default is
+    * DEFAULT_STATEMENT_CACHE_LIMIT. 0 means no caching, as for
+    * setShouldCacheStatements(false).
+    */
+   std::size_t statementCacheLimit() const;
+
+   /**
+    * Sets the most statements the cache keeps (see above). When the cache
+    * is over the new limit the least recently used statements are evicted
+    * at once, and whenever a new statement is cached it evicts the least
+    * recently used one if the limit would be exceeded. A statement is used
+    * when it is looked up for an execution. An evicted statement that no
+    * result set is using is finalized; one that a live result set is still
+    * using stays valid until that result set ends, and is then finalized.
+    * The limit counts the cache's entries only: statements owned by result
+    * sets are not counted.
+    */
+   void setStatementCacheLimit(std::size_t limit);
+
+   static const std::size_t DEFAULT_STATEMENT_CACHE_LIMIT = 128;
 
    /**
     *
@@ -408,7 +433,20 @@ protected:
    virtual void discardCachedStatement(DBStatement* statement);
 
 private:
-   std::map<std::string, DBStatement*> m_cachedStatements;
+   // the cache: the statements by SQL text, and the SQL texts from the most
+   // to the least recently used
+   struct CacheEntry {
+      DBStatement* statement;
+      std::list<std::string>::iterator position;
+   };
+
+   // takes the least recently used statements out of the cache until at most
+   // 'keep' are left, and hands each to discardCachedStatement()
+   void evictLeastRecentlyUsed(std::size_t keep);
+
+   std::map<std::string, CacheEntry> m_cachedStatements;
+   std::list<std::string> m_cacheOrder;
+   std::size_t m_statementCacheLimit;
    bool m_shouldCacheStatements;
 
 };

@@ -16,7 +16,7 @@
 
 # Reproductions of defects that are not fixed yet. Opt-in with
 # -DCHAPEAU_KNOWN_DEFECTS=ON; they fail until the defect is fixed. None of the
-# investigated critical defects (CH-01 .. CH-08) is open any more.
+# reproduced defects (CH-01 .. CH-08, CH-11 .. CH-13) is open any more.
 set(CHAPEAU_DEFECT_TABLE
 )
 
@@ -45,4 +45,9 @@ set(CHAPEAU_FIXED_TABLE
    # CH-08: was a characterization with no assertion; the result set now has a
    # status, so a busy step can be asserted to be an error rather than the end
    "CH-08|ch08_busy_in_next_is_an_error|60|a BUSY error inside next() looks like the end of the data"
+   # CH-11 .. CH-13 (H1a-5): the transaction state comes from SQLite, open() twice
+   # is refused instead of leaking, and the statement cache is bounded (LRU)
+   "CH-11|ch11_in_transaction_follows_external_commit|60|inTransaction() stale after a COMMIT run as plain SQL"
+   "CH-12|ch12_open_twice_keeps_one_connection|60|a second open() leaked the first connection"
+   "CH-13|ch13_statement_cache_is_bounded|60|the statement cache grows without bound"
 )

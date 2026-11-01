@@ -1,11 +1,13 @@
 #include "test_sqlite_foundation.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "scoped_temp_dir.h"
 #include "SQLiteDatabase.h"
@@ -118,6 +120,16 @@ void TestSQLiteFoundation::runTests() {
    test_busy_timeout_configuration();
    test_result_set_status_transitions();
    test_close_with_unfinalized_statement();
+   test_transaction_state_follows_sqlite();
+   test_open_when_already_open();
+   test_failed_open_recovers();
+   test_statement_cache_is_bounded();
+   test_statement_cache_limit_zero();
+   test_statement_cache_limit_one();
+   test_statement_cache_lru_order();
+   test_statement_cache_eviction_with_active_cursors();
+   test_statement_cache_lowering_limit_with_active_cursors();
+   test_statement_cache_cleanup_on_close();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -2157,4 +2169,546 @@ void TestSQLiteFoundation::test_close_with_unfinalized_statement() {
    // finalizing the last statement lets SQLite free the connection
    // (the leak check of a sanitizer build would notice if it did not)
    require(sqlite3_finalize(raw) == SQLITE_OK, "finalize the statement afterwards");
+}
+
+// ---- transaction state, opening, and the bounded statement cache (CH-11, CH-12, CH-13) ----
+
+namespace {
+
+// the SQL text of every statement that is open on the connection, sorted:
+// what SQLite itself holds, independently of what Chapeau thinks it holds
+vector<string> openStatementSql(SQLiteDatabase& db) {
+   vector<string> sql;
+   if (db.sqliteHandle() == nullptr) {
+      return sql;
+   }
+   for (sqlite3_stmt* s = sqlite3_next_stmt(db.sqliteHandle(), nullptr);
+        s != nullptr;
+        s = sqlite3_next_stmt(db.sqliteHandle(), s)) {
+      const char* text = sqlite3_sql(s);
+      sql.push_back(text != nullptr ? text : "");
+   }
+   sort(sql.begin(), sql.end());
+   return sql;
+}
+
+// the open statements as one readable string, for failure messages
+string describe(const vector<string>& sql) {
+   string out = "{";
+   for (size_t i = 0; i < sql.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + sql[i];
+   }
+   return out + "}";
+}
+
+// "select <n> * 2": a distinct statement for every n, with an answer known
+// without asking Chapeau
+long long runDistinctQuery(SQLiteDatabase& db, int n) {
+   return scalar(db, "select " + to_string(n) + " * 2");
+}
+
+}
+
+void TestSQLiteFoundation::test_transaction_state_follows_sqlite() {
+   TEST_CASE("test_transaction_state_follows_sqlite");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("txn_state.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+
+   require(!db.inTransaction(), "a database that was never opened is not in a transaction");
+   require(db.open(), "open");
+   require(!db.inTransaction(), "a new connection is not in a transaction");
+   require(exec(db, "create table acct(id integer primary key, v integer)"), "create table");
+
+   // the helpers
+   require(db.beginTransaction(), "begin");
+   require(db.inTransaction(), "in a transaction after begin");
+   require(!db.beginTransaction(), "a second begin is refused");
+   require(db.inTransaction(), "and the transaction is still open");
+   require(db.commit(), "commit");
+   require(!db.inTransaction(), "not in a transaction after commit");
+   require(db.beginDeferredTransaction(), "begin deferred");
+   require(db.inTransaction(), "in a transaction after begin deferred");
+   require(db.rollback(), "rollback");
+   require(!db.inTransaction(), "not in a transaction after rollback");
+
+   // SQL run outside the helpers is reflected, in both directions
+   require(exec(db, "BEGIN"), "BEGIN as plain SQL");
+   require(db.inTransaction(), "a BEGIN run as plain SQL is a transaction");
+   require(exec(db, "COMMIT"), "COMMIT as plain SQL");
+   require(!db.inTransaction(), "a COMMIT run as plain SQL ends it");
+
+   require(db.beginTransaction(), "begin with the helper");
+   require(exec(db, "COMMIT"), "COMMIT as plain SQL after the helper's begin");
+   require(!db.inTransaction(), "the helper's transaction, committed behind its back, is over");
+   require(!db.commit(), "commit() with no transaction open fails");
+   require(!db.inTransaction(), "and the state stays false");
+
+   require(db.beginTransaction(), "begin with the helper again");
+   require(exec(db, "ROLLBACK"), "ROLLBACK as plain SQL");
+   require(!db.inTransaction(), "a ROLLBACK run as plain SQL ends it");
+
+   // a statement can end a transaction without anyone saying COMMIT or ROLLBACK
+   require(exec(db, "insert into acct(id,v) values (1,10)"), "a row");
+   require(db.beginTransaction(), "begin");
+   require(!exec(db, "insert or rollback into acct(id,v) values (1,99)"),
+           "a conflict that resolves by rolling back");
+   require(!db.inTransaction(), "which has ended the transaction");
+
+   // close() rolls an open transaction back; a reopened connection starts clean
+   require(db.beginTransaction(), "begin before closing");
+   require(exec(db, "insert into acct(id,v) values (2,20)"), "uncommitted work");
+   db.close();
+   require(!db.inTransaction(), "a closed database is not in a transaction");
+   require(db.open(), "reopen");
+   require(!db.inTransaction(), "and the reopened connection is not either");
+   requireLongEquals(1, scalar(db, "select count(*) from acct"), "the uncommitted row did not survive");
+   db.close();
+   require(!db.inTransaction(), "closed again");
+}
+
+void TestSQLiteFoundation::test_open_when_already_open() {
+   TEST_CASE("test_open_when_already_open");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("open_twice.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+   sqlite3* const handle = db.sqliteHandle();
+   require(handle != nullptr, "a connection");
+
+   // plain double open
+   require(!db.open(), "open() on an open database fails");
+   require(db.sqliteHandle() == handle, "and the connection is the same one");
+   requireLongEquals(3, scalar(db, "select count(*) from items"), "and works");
+   requireLongEquals(0, db.lastErrorCode(), "without reporting an error of its own");
+
+   // with an active result set
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "an active result set, on its first row");
+      require(!db.open(), "open() with an active result set fails");
+      require(db.sqliteHandle() == handle, "the connection is unchanged");
+      if (rs) {
+         require(rs->status() == DBResultSetStatus::Row, "the result set was not invalidated");
+         requireLongEquals(1, rs->intForColumnIndex(0), "it is where it was");
+         require(rs->next(), "it continues");
+         requireLongEquals(2, rs->intForColumnIndex(0), "to the second row");
+         require(rs->next() && !rs->next(), "and to the end");
+         require(rs->status() == DBResultSetStatus::Done, "which is a normal end");
+      }
+   }
+
+   // with an open transaction
+   {
+      require(db.beginTransaction(), "begin");
+      require(exec(db, "insert into items(id,name) values (7,'seven')"), "work in the transaction");
+      require(!db.open(), "open() inside a transaction fails");
+      require(db.sqliteHandle() == handle, "the connection is unchanged");
+      require(db.inTransaction(), "the transaction is intact");
+      requireLongEquals(1, scalar(db, "select count(*) from items where id = 7"),
+                        "so is its uncommitted work");
+      require(db.commit(), "it commits");
+      require(!db.inTransaction(), "and ends");
+      requireLongEquals(1, countFromNewConnection(path, "items where id = 7"),
+                        "another connection sees the committed row");
+   }
+
+   // with prepared statements: the cache is untouched
+   {
+      for (int n = 0; n < 5; ++n) {
+         runDistinctQuery(db, n);
+      }
+      const vector<string> before = openStatementSql(db);
+      require(before.size() >= 5, "statements are cached");
+      require(!db.open(), "open() with cached statements fails");
+      const vector<string> after = openStatementSql(db);
+      require(before == after,
+              "the same statements are open afterwards: " + describe(before) + " / " + describe(after));
+   }
+
+   // the busy timeout configuration is kept
+   db.setBusyRetryTimeout(321);
+   require(!db.open(), "open() once more fails");
+   requireLongEquals(321, db.busyRetryTimeout(), "the busy timeout reads back unchanged");
+   requireLongEquals(321, scalar(db, "pragma busy_timeout"), "and so does SQLite's");
+
+   // close() is still safe and may be repeated, and open() works after it
+   db.close();
+   db.close();
+   require(db.sqliteHandle() == nullptr, "closed");
+   require(db.open(), "open() on a closed database works");
+   requireLongEquals(4, scalar(db, "select count(*) from items"), "with the committed data");
+   require(!db.open(), "and fails again while open");
+   db.close();
+   db.close();
+}
+
+void TestSQLiteFoundation::test_failed_open_recovers() {
+   TEST_CASE("test_failed_open_recovers");
+   chapeau_tests::ScopedTempDir dir;
+   const fs::path missing = fs::path(dir.file("not_there_yet"));
+   SQLiteDatabase db((missing / "late.sqlite3").string());
+   db.setLogsErrors(false);
+   db.setBusyRetryTimeout(444);
+
+   for (int attempt = 0; attempt < 3; ++attempt) {
+      const string label = "attempt " + to_string(attempt);
+      require(!db.open(), label + ": open() fails, the directory does not exist");
+      require(db.sqliteHandle() == nullptr, label + ": no handle is left behind");
+      requireLongEquals(SQLITE_CANTOPEN, db.lastErrorCode(), label + ": the reason is available");
+      requireStringEquals("unable to open database file", db.lastErrorMessage(),
+                          label + ": with SQLite's own message");
+      require(db.hadError(), label + ": hadError()");
+      require(!db.goodConnection(), label + ": no good connection");
+      require(!exec(db, "create table z(a integer)"), label + ": nothing can be run on it");
+      require(!db.inTransaction(), label + ": not in a transaction");
+   }
+   db.close();   // nothing to close, and that is fine
+   db.close();
+
+   // the object recovers once the file can be created
+   require(fs::create_directory(missing), "create the directory");
+   require(db.open(), "open() now works");
+   require(db.sqliteHandle() != nullptr, "with a connection");
+   requireLongEquals(SQLITE_OK, db.lastErrorCode(), "and no error is reported");
+   require(!db.hadError(), "hadError() is false");
+   requireLongEquals(444, scalar(db, "pragma busy_timeout"), "the configured busy timeout was applied");
+   require(db.goodConnection(), "a good connection");
+   require(exec(db, "create table z(a integer)"), "which works");
+   require(exec(db, "insert into z(a) values (5)"), "and stores data");
+   requireLongEquals(5, scalar(db, "select a from z"), "that reads back");
+   db.close();
+   require(!db.hadError(), "a closed database that opened fine reports no error");
+}
+
+void TestSQLiteFoundation::test_statement_cache_is_bounded() {
+   TEST_CASE("test_statement_cache_is_bounded");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_bound.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   requireLongEquals(128, SQLiteDatabase::DEFAULT_STATEMENT_CACHE_LIMIT, "the default limit is 128");
+   requireLongEquals(128, static_cast<long long>(db.statementCacheLimit()), "a new database has it");
+   require(db.shouldCacheStatements(), "and caches");
+
+   // thousands of distinct statements, every answer checked
+   for (int n = 0; n < 3000; ++n) {
+      if (runDistinctQuery(db, n) != 2LL * n) {
+         requireLongEquals(2LL * n, runDistinctQuery(db, n), "answer for statement " + to_string(n));
+         break;
+      }
+   }
+   requireLongEquals(128, static_cast<long long>(openStatementSql(db).size()),
+                     "3000 distinct queries leave exactly 128 statements open");
+
+   // updates and inserts go through the same cache
+   require(exec(db, "create table log(id integer primary key, msg text)"), "create table");
+   require(db.beginDeferredTransaction(), "one transaction for many inserts");
+   for (int n = 0; n < 1500; ++n) {
+      if (!exec(db, "insert into log(id,msg) values (" + to_string(n) + ",'m')")) {
+         require(false, "insert " + to_string(n));
+         break;
+      }
+   }
+   require(db.commit(), "commit");
+   requireLongEquals(128, static_cast<long long>(openStatementSql(db).size()),
+                     "1500 distinct inserts do not grow it");
+   requireLongEquals(1500, scalar(db, "select count(*) from log"), "and every insert ran");
+
+   // the limit is independent of the on/off switch, and survives close()/open()
+   db.setShouldCacheStatements(false);
+   require(!db.shouldCacheStatements(), "switched off");
+   requireLongEquals(128, static_cast<long long>(db.statementCacheLimit()), "the limit is kept");
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "and the cache is empty");
+   db.setShouldCacheStatements(true);
+   require(db.shouldCacheStatements(), "switched on again");
+   db.close();
+   require(db.open(), "reopen");
+   requireLongEquals(128, static_cast<long long>(db.statementCacheLimit()), "the limit survives close/open");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_limit_zero() {
+   TEST_CASE("test_statement_cache_limit_zero");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_zero.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   for (int n = 0; n < 10; ++n) {
+      runDistinctQuery(db, n);
+   }
+   require(openStatementSql(db).size() == 10, "ten statements are cached");
+
+   db.setStatementCacheLimit(0);
+   requireLongEquals(0, static_cast<long long>(db.statementCacheLimit()), "the limit reads back as 0");
+   require(!db.shouldCacheStatements(), "a limit of 0 means no caching");
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()),
+                     "and the cache was emptied at once");
+
+   for (int n = 0; n < 50; ++n) {
+      requireLongEquals(2LL * n, runDistinctQuery(db, n), "query " + to_string(n) + " works uncached");
+   }
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "nothing is left open");
+   unsigned long rowsAffected = 0;
+   require(db.executeUpdate("create table t(a integer)", rowsAffected), "an update works uncached");
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "and leaves nothing open");
+
+   // the switch cannot turn caching on while the limit is 0 ...
+   db.setShouldCacheStatements(true);
+   require(!db.shouldCacheStatements(), "switching on does not override a limit of 0");
+   runDistinctQuery(db, 1);
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "so nothing is cached");
+
+   // ... and a positive limit does
+   db.setStatementCacheLimit(5);
+   require(db.shouldCacheStatements(), "a positive limit caches again");
+   for (int n = 0; n < 20; ++n) {
+      runDistinctQuery(db, n);
+   }
+   requireLongEquals(5, static_cast<long long>(openStatementSql(db).size()), "up to the new limit");
+
+   // setShouldCacheStatements(false) is the same as 0 as far as the cache goes
+   db.setShouldCacheStatements(false);
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "emptied");
+   runDistinctQuery(db, 3);
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "and not refilled");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_limit_one() {
+   TEST_CASE("test_statement_cache_limit_one");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_one.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   db.setStatementCacheLimit(1);
+
+   const auto cachedSql = [&db]() { return openStatementSql(db); };
+   const auto onlyStatement = [&db]() {
+      return sqlite3_next_stmt(db.sqliteHandle(), nullptr);
+   };
+
+   requireLongEquals(2, runDistinctQuery(db, 1), "query 1");
+   require(cachedSql() == vector<string>{"select 1 * 2"}, "it is the one cached statement");
+   sqlite3_stmt* const first = onlyStatement();
+
+   requireLongEquals(2, runDistinctQuery(db, 1), "query 1 again");
+   require(onlyStatement() == first, "the same statement was reused, not prepared again");
+
+   requireLongEquals(4, runDistinctQuery(db, 2), "query 2");
+   require(cachedSql() == vector<string>{"select 2 * 2"}, "it replaced query 1 as the one cached statement");
+
+   requireLongEquals(2, runDistinctQuery(db, 1), "query 1 once more");
+   require(cachedSql() == vector<string>{"select 1 * 2"}, "and replaced query 2 in turn");
+   requireLongEquals(1, static_cast<long long>(cachedSql().size()), "never more than one");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_lru_order() {
+   TEST_CASE("test_statement_cache_lru_order");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_lru.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   db.setStatementCacheLimit(3);
+
+   const auto sql = [](int n) { return "select " + to_string(n) + " * 2"; };
+   const auto expectCached = [&](const vector<int>& ns, const string& label) {
+      vector<string> expected;
+      for (int n : ns) {
+         expected.push_back(sql(n));
+      }
+      sort(expected.begin(), expected.end());
+      const vector<string> actual = openStatementSql(db);
+      require(actual == expected,
+              label + ": expected " + describe(expected) + ", SQLite holds " + describe(actual));
+   };
+
+   runDistinctQuery(db, 1);
+   runDistinctQuery(db, 2);
+   runDistinctQuery(db, 3);
+   expectCached({1, 2, 3}, "after 1, 2, 3");
+
+   runDistinctQuery(db, 1);      // 1 becomes the most recently used; 2 the least
+   runDistinctQuery(db, 4);      // evicts 2
+   expectCached({1, 3, 4}, "after using 1 and adding 4 (2 was least recently used)");
+
+   runDistinctQuery(db, 3);      // order, most to least recent: 3, 4, 1
+   runDistinctQuery(db, 5);      // evicts 1
+   expectCached({3, 4, 5}, "after using 3 and adding 5 (1 was least recently used)");
+
+   runDistinctQuery(db, 2);      // 2 was evicted: prepared again; evicts 4
+   expectCached({2, 3, 5}, "after 2 came back (4 was least recently used)");
+
+   // an update statement takes part in the same order
+   unsigned long rowsAffected = 0;
+   require(db.executeUpdate("create table lru(a integer)", rowsAffected), "an update statement");
+   vector<string> expectedAfterUpdate = {sql(2), sql(5), "create table lru(a integer)"};
+   sort(expectedAfterUpdate.begin(), expectedAfterUpdate.end());
+   require(openStatementSql(db) == expectedAfterUpdate,
+           "the update is cached too, and evicted 3 (the least recently used): " +
+           describe(openStatementSql(db)));
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_eviction_with_active_cursors() {
+   TEST_CASE("test_statement_cache_eviction_with_active_cursors");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_active.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+   db.setStatementCacheLimit(2);
+
+   const string sqlA = "select id from items order by id";
+   const string sqlB = "select name from items order by id";
+   const string sqlC = "select qty from items order by id";
+
+   {
+      unique_ptr<SQLiteResultSet> a(openCursor(db, sqlA));
+      require(a && a->next(), "a cursor on A, on its first row");
+      requireLongEquals(1, a ? a->intForColumnIndex(0) : -1, "A's first id");
+      require(openStatementSql(db) == vector<string>{sqlA}, "A's statement is cached, and in use");
+
+      runDistinctQuery(db, 1);   // cached: B-like statement #1
+      const string filler = "select 1 * 2";
+      require(openStatementSql(db) == (vector<string>{filler, sqlA}), "A and a second statement are cached");
+
+      // a third statement evicts the least recently used one: A, which is active
+      scalar(db, sqlC);
+      vector<string> expected = {filler, sqlA, sqlC};
+      sort(expected.begin(), expected.end());
+      require(openStatementSql(db) == expected,
+              "A was evicted from the cache but is still open: " + describe(openStatementSql(db)));
+
+      // the evicted statement keeps working for its result set
+      if (a) {
+         require(a->next(), "A's cursor goes on after its statement was evicted");
+         requireLongEquals(2, a->intForColumnIndex(0), "with the right second id");
+         require(a->status() == DBResultSetStatus::Row, "still a normal row");
+         require(a->next() && !a->next(), "to the end");
+         require(a->status() == DBResultSetStatus::Done, "which is a normal end");
+      }
+      // it ended: its statement, owned by the result set since the eviction, is finalized
+      vector<string> afterEnd = {filler, sqlC};
+      sort(afterEnd.begin(), afterEnd.end());
+      require(openStatementSql(db) == afterEnd,
+              "once A's cursor ended its statement is gone: " + describe(openStatementSql(db)));
+   }
+
+   // the same, but the cursor is simply destroyed part way
+   {
+      db.clearCachedStatements();
+      unique_ptr<SQLiteResultSet> b(openCursor(db, sqlB));
+      require(b && b->next(), "a cursor on B");
+      scalar(db, sqlA);
+      scalar(db, sqlC);          // evicts B
+      require(openStatementSql(db).size() == 3, "B is evicted but open, besides A and C");
+      b.reset();
+      require(openStatementSql(db).size() == 2, "destroying the cursor finalizes it");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_lowering_limit_with_active_cursors() {
+   TEST_CASE("test_statement_cache_lowering_limit_with_active_cursors");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_lower.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+   db.setStatementCacheLimit(10);
+
+   const auto sql = [](int n) { return "select id + " + to_string(n) + " from items order by id"; };
+   unique_ptr<SQLiteResultSet> cursors[7];
+   for (int n = 1; n <= 6; ++n) {
+      // 1 and 3 stay active; the others run to the end at once
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, sql(n)));
+      require(rs && rs->next(), "query " + to_string(n));
+      if (n == 1 || n == 3) {
+         cursors[n].swap(rs);
+      } else {
+         while (rs && rs->next()) {
+         }
+      }
+   }
+   requireLongEquals(6, static_cast<long long>(openStatementSql(db).size()), "six statements are cached");
+
+   // lower the limit: most recently used first -- 6, 5 stay; 4, 3, 2, 1 go
+   db.setStatementCacheLimit(2);
+   requireLongEquals(2, static_cast<long long>(db.statementCacheLimit()), "the limit reads back");
+   vector<string> expected = {sql(1), sql(3), sql(5), sql(6)};
+   sort(expected.begin(), expected.end());
+   require(openStatementSql(db) == expected,
+           "2 and 4 (idle) were finalized, 1 and 3 (active) were not: " + describe(openStatementSql(db)));
+
+   // the active ones are undisturbed and give the right rows (id + n for ids 1, 2, 3)
+   for (int n : {1, 3}) {
+      unique_ptr<SQLiteResultSet>& rs = cursors[n];
+      require(rs != nullptr, "cursor " + to_string(n));
+      if (!rs) {
+         continue;
+      }
+      requireLongEquals(1 + n, rs->longForColumnIndex(0), "cursor " + to_string(n) + " first row");
+      require(rs->next(), "cursor " + to_string(n) + " second row");
+      requireLongEquals(2 + n, rs->longForColumnIndex(0), "cursor " + to_string(n) + " second value");
+   }
+
+   // switching the cache off entirely, with those two still active
+   db.setStatementCacheLimit(0);
+   expected = {sql(1), sql(3)};
+   sort(expected.begin(), expected.end());
+   require(openStatementSql(db) == expected,
+           "limit 0 finalized the idle ones, the two active statements stay: " + describe(openStatementSql(db)));
+   for (int n : {1, 3}) {
+      unique_ptr<SQLiteResultSet>& rs = cursors[n];
+      if (rs) {
+         require(rs->next(), "cursor " + to_string(n) + " third row");
+         requireLongEquals(3 + n, rs->longForColumnIndex(0), "cursor " + to_string(n) + " third value");
+         require(!rs->next(), "cursor " + to_string(n) + " ends");
+         require(rs->status() == DBResultSetStatus::Done, "normally");
+      }
+   }
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()),
+                     "when the last active cursor ended, nothing is open");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_cache_cleanup_on_close() {
+   TEST_CASE("test_statement_cache_cleanup_on_close");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_close.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   for (int n = 0; n < 200; ++n) {
+      runDistinctQuery(db, n);
+   }
+   unique_ptr<SQLiteResultSet> active(openCursor(db, "select id from items order by id"));
+   unique_ptr<SQLiteResultSet> evicted(openCursor(db, "select name from items order by id"));
+   require(active && evicted && active->next() && evicted->next(), "two active cursors");
+   for (int n = 200; n < 400; ++n) {
+      runDistinctQuery(db, n);   // evicts the older statements, the cursors' included
+   }
+   require(openStatementSql(db).size() >= 128, "a full cache, and the evicted statements still open");
+
+   db.close();
+   require(db.sqliteHandle() == nullptr, "the connection closed with a full cache and active cursors");
+   if (active && evicted) {
+      require(active->status() == DBResultSetStatus::Invalidated, "the cursors were invalidated");
+      require(evicted->status() == DBResultSetStatus::Invalidated, "including the one whose statement was evicted");
+   }
+
+   // everything that was open was finalized: the connection can be reopened clean,
+   // and a leak check of a sanitizer build would notice anything left over
+   require(db.open(), "reopen");
+   requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "no statement carried over");
+   requireLongEquals(2LL * 7, runDistinctQuery(db, 7), "and queries work again");
+   db.close();
 }

@@ -31,7 +31,22 @@ public:
    SQLiteDatabase(const std::string& inPath);
    ~SQLiteDatabase();
 
+   /**
+    * Opens the database file. Fails (returns false) if this object already has
+    * an open connection, and then changes nothing: the connection, its result
+    * sets, its transaction and its cached statements stay as they are. It
+    * also fails if the file cannot be opened, and then no connection is left
+    * behind, the reason is available from lastErrorCode() and
+    * lastErrorMessage(), and open() may be tried again (for instance once the
+    * missing directory exists).
+    */
    bool open();
+
+   /**
+    * Closes the connection: its result sets are invalidated, every statement
+    * is finalized, an open transaction is rolled back. Safe on a database that
+    * is not open, and safe to repeat.
+    */
    void close();
    bool goodConnection();
 
@@ -82,7 +97,19 @@ public:
    bool inUse();
    void setInUse(bool value);
 
+   /**
+    * Whether a transaction is open on the connection, as SQLite itself says
+    * (the inverse of sqlite3_get_autocommit): true after a successful BEGIN,
+    * after a COMMIT that failed and left the transaction open, and after a
+    * BEGIN run as plain SQL; false after COMMIT or ROLLBACK however they were
+    * run, and on a database that is not open.
+    */
    bool inTransaction();
+
+   /**
+    * Does nothing: whether a transaction is open is not something to set. Kept
+    * so that existing code still builds.
+    */
    void setInTransaction(bool flag);
 
    bool traceExecution();
@@ -168,6 +195,12 @@ private:
    //                      prepared with caching off, or one the cache gave up).
    //                      -> gone: its result set ends, is destroyed, or is
    //                         invalidated by the database closing
+   // Eviction from the cache (the limit lowered, or a new statement over the
+   // limit) takes the least recently used statement out and hands it to
+   // discardCachedStatement(), so it follows the same transitions as clearing
+   // the cache: cached idle -> gone (finalized); cached active -> uncached
+   // active, and its result set finalizes it when it ends. The limit counts the
+   // cache's entries only; statements owned by result sets are not counted.
    // A result set is active until it ends (see SQLiteResultSet); an ended
    // result set holds no statement.
    //
@@ -186,10 +219,14 @@ private:
    bool        m_logsErrors;
    bool        m_crashOnErrors;
    bool        m_inUse;
-   bool        m_inTransaction;
    bool        m_traceExecution;
    bool        m_checkedOut;
    int         m_busyRetryTimeout;
+
+   // why the last open() failed, for lastErrorCode() and lastErrorMessage()
+   // while there is no connection to ask; SQLITE_OK if it did not
+   int         m_openErrorCode;
+   std::string m_openErrorMessage;
 
    SQLiteDatabase();
    SQLiteDatabase(const SQLiteDatabase&);
