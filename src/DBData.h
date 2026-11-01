@@ -10,6 +10,10 @@
 
 namespace chapeau {
 
+/**
+ * A blob: a length and that many bytes. An empty DBData (length 0) is a
+ * zero-length blob -- not SQL NULL, which is spelled DBNull or a null argument.
+ */
 class DBData : public DBAbstractDataType {
 
 public:
@@ -18,11 +22,17 @@ public:
       m_length( 0L ) {
    }
 
+   // Copies 'length' bytes from 'buffer'. A zero length, or no buffer at all,
+   // gives an empty DBData; nothing is copied then (memcpy with a null pointer
+   // is undefined even for zero bytes, and so is &v[0] of an empty vector).
    DBData(const void* buffer, unsigned long length) :
       DBAbstractDataType(std::string("Data")),
-      m_buffer(length),
-      m_length(length) {
-      ::memcpy(&m_buffer[0], buffer, m_length);
+      m_length(0L) {
+      if (buffer != nullptr && length > 0) {
+         m_buffer.assign(static_cast<const char*>(buffer),
+                         static_cast<const char*>(buffer) + length);
+         m_length = length;
+      }
    }
 
    DBData(const DBData& copy) :

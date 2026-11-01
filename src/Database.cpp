@@ -1,6 +1,8 @@
 // Database.cpp
 
 #include "Database.h"
+#include <climits>
+#include <cstdint>
 #include "DBNull.h"
 #include "DBBool.h"
 #include "DBInt.h"
@@ -274,6 +276,44 @@ DBResultSetStatus DBResultSet::status() const {
 
 int DBResultSet::lastErrorCode() const {
    return 0;
+}
+
+//******************************************************************************
+
+std::int64_t DBResultSet::int64ForColumn(const std::string& columnName) const {
+   return longForColumn(columnName);
+}
+
+//******************************************************************************
+
+std::int64_t DBResultSet::int64ForColumnIndex(int columnIdx) const {
+   return longForColumnIndex(columnIdx);
+}
+
+//******************************************************************************
+
+bool DBResultSet::intForColumn(const std::string&, int& value) const {
+   // nothing here can look a column up by name: a subclass that can overrides
+   value = 0;
+   return false;
+}
+
+//******************************************************************************
+
+bool DBResultSet::intForColumnIndex(int columnIdx, int& value) const {
+   value = 0;
+
+   if (getTypeForColumnIndex(columnIdx) != ValueTypeInteger) {
+      return false;
+   }
+
+   const std::int64_t wide = int64ForColumnIndex(columnIdx);
+   if (wide > INT_MAX || wide < INT_MIN) {
+      return false;
+   }
+
+   value = static_cast<int>(wide);
+   return true;
 }
 
 //******************************************************************************

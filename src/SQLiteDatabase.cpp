@@ -346,11 +346,17 @@ bool SQLiteDatabase::bindData(const DBData* data, int idx, DBStatement* statemen
    bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
    if (stmt) {
-      const int rc = ::sqlite3_bind_blob(stmt->statement(),
-                        idx,
-                        data->value(),
-                        (int) data->length(),
-                        SQLITE_TRANSIENT);
+      // SQLite binds NULL when the pointer it is given is null, whatever the
+      // length, and an empty DBData has no buffer to point to. A zero-length
+      // BLOB is asked for explicitly, so that it is not stored as NULL; NULL
+      // itself is bound by bindNull() (DBNull, or a null argument).
+      const int rc = (data->length() == 0)
+         ? ::sqlite3_bind_zeroblob(stmt->statement(), idx, 0)
+         : ::sqlite3_bind_blob(stmt->statement(),
+                               idx,
+                               data->value(),
+                               (int) data->length(),
+                               SQLITE_TRANSIENT);
       if (rc == SQLITE_OK) {
          bindSuccess = true;
       }

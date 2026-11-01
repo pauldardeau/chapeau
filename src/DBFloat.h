@@ -9,6 +9,15 @@
 
 namespace chapeau {
 
+/**
+ * A float to bind. SQLite stores floating point values as doubles, so the float
+ * is promoted to the double with exactly the same value and that is what is
+ * stored and read back: DBFloat(0.1f) holds 0.100000001490116..., not 0.1.
+ * Nothing is lost, but it is not the double nearest to the decimal 0.1 either,
+ * so a comparison such as WHERE x = 0.1 does not match it. To store the
+ * precision of a double (or of a decimal literal) use DBDouble.
+ * Binding a NaN stores SQL NULL, as SQLite does.
+ */
 class DBFloat : public DBAbstractDataType {
 
 public:

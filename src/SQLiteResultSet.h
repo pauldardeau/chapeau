@@ -1,6 +1,7 @@
 #ifndef CHAPEAU_SQLITERESULTSET_H
 #define CHAPEAU_SQLITERESULTSET_H
 
+#include <cstdint>
 #include <string>
 #include <map>
 
@@ -44,9 +45,18 @@ class Date;
  * An ended result set has let go
  * of its statement: next() keeps returning false (the query never restarts),
  * close() may be repeated, and every column accessor returns what it returns
- * for a NULL column (0, false, 0.0, nullptr/false for strings, an empty
- * DBData, a DBDate of 0.0, getColumnCount() 0, ValueTypeNull,
- * columnIndexForName() -1). A result set may be destroyed at any time, before
+ * for a NULL column: 0, false, 0.0, nullptr (or false) for strings, nullptr
+ * for dates and blobs, false from the checked integer accessors,
+ * getColumnCount() 0, ValueTypeNull, columnIndexForName() -1.
+ *
+ * SQL NULL and a real value are told apart where the accessor returns a
+ * pointer: stringForColumn*, dateForColumn* and dataForColumn* return nullptr
+ * for NULL. A zero-length BLOB is a non-null, empty DBData, and the Unix epoch
+ * is a non-null DBDate of 0.0. The accessors that return a number cannot say
+ * NULL: use getTypeForColumnIndex(), or the checked intForColumn*(…, int&).
+ * Text and blob values are returned with all their bytes, NUL bytes included.
+ *
+ * A result set may be destroyed at any time, before
  * or after the database it came from, and is not revived by the database
  * being opened again. Turning statement caching off does not affect an active
  * result set. Single-threaded: a result set and its database must not be used
@@ -128,19 +138,58 @@ public:
     */
    bool next();
 
+   // the overloads of the base class that are not overridden here (the
+   // 64-bit and the checked accessors) stay visible through this class
+   using DBResultSet::intForColumn;
+   using DBResultSet::intForColumnIndex;
+
    /**
-    *
+    * The column as an int; a value outside the range of int saturates to
+    * INT_MIN or INT_MAX, it does not wrap (see DBResultSet::intForColumn).
     * @param columnName
     * @return
     */
    int intForColumn(const std::string& columnName) const;
 
    /**
-    *
+    * The column as an int (see intForColumn).
     * @param columnIdx
     * @return
     */
    int intForColumnIndex(int columnIdx) const;
+
+   /**
+    * The column as a 64-bit integer: sqlite3_column_int64, at full width on
+    * every platform.
+    * @param columnName
+    * @return
+    */
+   std::int64_t int64ForColumn(const std::string& columnName) const;
+
+   /**
+    * The column as a 64-bit integer (see int64ForColumn).
+    * @param columnIdx
+    * @return
+    */
+   std::int64_t int64ForColumnIndex(int columnIdx) const;
+
+   /**
+    * The column as an int, if it is a SQLite INTEGER that fits.
+    * @param columnName
+    * @param value the value, or 0 when this returns false
+    * @return false for NULL, REAL, TEXT, BLOB, an unknown column, an integer
+    * outside the range of int, and a result set that has ended
+    */
+   bool intForColumn(const std::string& columnName, int& value) const;
+
+   /**
+    * The column as an int, if it is a SQLite INTEGER that fits.
+    * @param columnIdx
+    * @param value the value, or 0 when this returns false
+    * @return false for NULL, REAL, TEXT, BLOB, a column that does not exist,
+    * an integer outside the range of int, and a result set that has ended
+    */
+   bool intForColumnIndex(int columnIdx, int& value) const;
 
    /**
     *

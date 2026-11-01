@@ -28,6 +28,10 @@ class SQLiteResultSet;
  * update prepared before an ALTER TABLE or CREATE INDEX still works, and sees
  * the new schema, afterwards.
  *
+ * Also covers data fidelity (CH-14 .. CH-19): integers read at full width or
+ * saturated, never wrapped; text and blobs with all their bytes; SQL NULL told
+ * from an empty blob and from the Unix epoch; the checked integer accessors.
+ *
  * Also covers the transaction state, which comes from SQLite (CH-11), open() on
  * an open database and a failed open() (CH-12), and the bounded, least recently
  * used statement cache (CH-13).
@@ -83,6 +87,13 @@ protected:
    void test_statement_cache_eviction_with_active_cursors();
    void test_statement_cache_lowering_limit_with_active_cursors();
    void test_statement_cache_cleanup_on_close();
+   void test_text_with_nul_bytes();
+   void test_null_empty_and_nonempty_blobs();
+   void test_null_dates();
+   void test_integer_accessors();
+   void test_boolean_conversion_of_wide_integers();
+   void test_float_binding_is_exact_promotion();
+   void test_legacy_result_set_subclass_still_works();
 
    void requireLongEquals(long long expected,
                           long long actual,

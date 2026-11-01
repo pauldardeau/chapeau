@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,7 @@
 #include "DBData.h"
 #include "DBDate.h"
 #include "DBDouble.h"
+#include "DBFloat.h"
 #include "DBInt.h"
 #include "DBLong.h"
 #include "DBNull.h"
@@ -130,6 +132,13 @@ void TestSQLiteFoundation::runTests() {
    test_statement_cache_eviction_with_active_cursors();
    test_statement_cache_lowering_limit_with_active_cursors();
    test_statement_cache_cleanup_on_close();
+   test_text_with_nul_bytes();
+   test_null_empty_and_nonempty_blobs();
+   test_null_dates();
+   test_integer_accessors();
+   test_boolean_conversion_of_wide_integers();
+   test_float_binding_is_exact_promotion();
+   test_legacy_result_set_subclass_still_works();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -706,7 +715,8 @@ const char* const ITEMS_BY_ID = "select id, name from items order by id";
 }
 
 // A result set with no data behind it (its database was closed or destroyed)
-// answers like a NULL column everywhere, and never touches freed memory.
+// answers like a NULL column everywhere -- 0, false, nullptr for every pointer
+// the accessors return -- and never touches freed memory.
 void TestSQLiteFoundation::requireCursorHasNoData(SQLiteResultSet& rs,
                                                   const string& when) {
    require(!rs.next(), when + ": next() is false");
@@ -727,13 +737,23 @@ void TestSQLiteFoundation::requireCursorHasNoData(SQLiteResultSet& rs,
    requireStringEquals("", value, when + ": stringForColumnIndex(string&) clears its argument");
    require(!rs.stringForColumn("name", value), when + ": stringForColumn(string&)");
 
+   // SQL NULL for every column: no data, no date (not an empty blob, not the epoch)
    unique_ptr<DBData> data(rs.dataForColumnIndex(0));
-   require(data != nullptr && data->length() == 0, when + ": dataForColumnIndex is empty");
+   require(data == nullptr, when + ": dataForColumnIndex is nullptr");
+   unique_ptr<DBData> namedData(rs.dataForColumn("name"));
+   require(namedData == nullptr, when + ": dataForColumn is nullptr");
    unique_ptr<DBDate> date(rs.dateForColumnIndex(0));
-   require(date != nullptr, when + ": dateForColumnIndex");
-   if (date) {
-      requireDoubleEquals(0.0, date->timeIntervalSince1970(), when + ": date is 0.0");
-   }
+   require(date == nullptr, when + ": dateForColumnIndex is nullptr");
+   unique_ptr<DBDate> namedDate(rs.dateForColumn("name"));
+   require(namedDate == nullptr, when + ": dateForColumn is nullptr");
+   requireLongEquals(0, rs.int64ForColumnIndex(0), when + ": int64ForColumnIndex");
+   requireLongEquals(0, rs.int64ForColumn("id"), when + ": int64ForColumn");
+   int checked = 99;
+   require(!rs.intForColumnIndex(0, checked), when + ": checked intForColumnIndex is false");
+   requireLongEquals(0, checked, when + ": and sets 0");
+   checked = 99;
+   require(!rs.intForColumn("id", checked), when + ": checked intForColumn is false");
+   requireLongEquals(0, checked, when + ": and sets 0");
    requireLongEquals(0, rs.getColumnCount(), when + ": getColumnCount");
    require(rs.getTypeForColumnIndex(0) == ValueTypeNull, when + ": getTypeForColumnIndex");
    requireLongEquals(-1, rs.columnIndexForName("id"), when + ": columnIndexForName");
@@ -2711,4 +2731,649 @@ void TestSQLiteFoundation::test_statement_cache_cleanup_on_close() {
    requireLongEquals(0, static_cast<long long>(openStatementSql(db).size()), "no statement carried over");
    requireLongEquals(2LL * 7, runDistinctQuery(db, 7), "and queries work again");
    db.close();
+}
+
+// ---- data fidelity: integers, text with NULs, blobs, dates (CH-14, CH-15, CH-16, CH-17, CH-19) ----
+
+namespace {
+
+// the first row of a query run on a connection that Chapeau knows nothing
+// about, columns joined with '|' and NULL written as "NULL": what SQLite really
+// holds, independent of what Chapeau's accessors make of it
+string rawFirstRow(const string& path, const string& sql) {
+   string out;
+   sqlite3* handle = nullptr;
+   if (sqlite3_open(path.c_str(), &handle) == SQLITE_OK) {
+      sqlite3_stmt* stmt = nullptr;
+      if (sqlite3_prepare_v2(handle, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK &&
+          sqlite3_step(stmt) == SQLITE_ROW) {
+         for (int i = 0; i < sqlite3_column_count(stmt); ++i) {
+            const unsigned char* text = sqlite3_column_text(stmt, i);
+            out += (i > 0 ? "|" : "");
+            out += (text != nullptr) ? reinterpret_cast<const char*>(text) : "NULL";
+         }
+      } else {
+         out = "ERROR " + string(sqlite3_errmsg(handle));
+      }
+      sqlite3_finalize(stmt);
+   }
+   sqlite3_close(handle);
+   return out;
+}
+
+string hexOf(const string& bytes) {
+   static const char digits[] = "0123456789ABCDEF";
+   string out;
+   for (unsigned char c : bytes) {
+      out += digits[c >> 4];
+      out += digits[c & 15];
+   }
+   return out;
+}
+
+// what an int accessor must return for a stored 64-bit value: the value itself
+// if it fits, otherwise the nearest int
+int expectedSaturated(long long value) {
+   if (value > INT_MAX) {
+      return INT_MAX;
+   }
+   if (value < INT_MIN) {
+      return INT_MIN;
+   }
+   return static_cast<int>(value);
+}
+
+// a DBResultSet that knows only the original interface: it overrides the pure
+// virtuals and nothing that was added later (status(), int64ForColumn(),
+// the checked intForColumn()), as a subclass written before them would
+class LegacyResultSet : public DBResultSet {
+public:
+   long storedLong;
+   DBValueType storedType;
+   LegacyResultSet() : storedLong(0), storedType(ValueTypeInteger) {}
+
+   bool next() { return false; }
+   void close() {}
+   int intForColumn(const string&) const { return static_cast<int>(storedLong); }
+   int intForColumnIndex(int) const { return static_cast<int>(storedLong); }
+   long longForColumn(const string&) const { return storedLong; }
+   long longForColumnIndex(int) const { return storedLong; }
+   bool boolForColumn(const string&) const { return storedLong != 0; }
+   bool boolForColumnIndex(int) const { return storedLong != 0; }
+   double doubleForColumn(const string&) const { return 0; }
+   double doubleForColumnIndex(int) const { return 0; }
+   string* stringForColumn(const string&) const { return nullptr; }
+   string* stringForColumnIndex(int) const { return nullptr; }
+   bool stringForColumn(const string&, string&) const { return false; }
+   bool stringForColumnIndex(int, string&) const { return false; }
+   DBDate* dateForColumn(const string&) const { return nullptr; }
+   DBDate* dateForColumnIndex(int) const { return nullptr; }
+   DBData* dataForColumn(const string&) const { return nullptr; }
+   DBData* dataForColumnIndex(int) const { return nullptr; }
+   int getColumnCount() const { return 1; }
+   DBValueType getTypeForColumnIndex(int) const { return storedType; }
+};
+
+}
+
+void TestSQLiteFoundation::test_text_with_nul_bytes() {
+   TEST_CASE("test_text_with_nul_bytes");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("text_nul.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table txt(id integer primary key, s text)"), "create table");
+
+   string longValue(1000, 'x');
+   longValue[500] = '\0';
+   const vector<string> inputs = {
+      string(),                      // empty string
+      string("ab\0cd", 5),           // embedded NUL
+      string("\0abc", 4),            // leading NUL
+      string("abc\0", 4),            // trailing NUL
+      string("\0", 1),               // only a NUL
+      string("\0\0\0", 3),           // repeated NULs
+      string("h\xC3\xA9llo w\xC3\xB6rld \xE2\x9C\x93"),   // ordinary UTF-8
+      longValue                      // a long value with a NUL in the middle
+   };
+
+   for (size_t n = 0; n < inputs.size(); ++n) {
+      const string& input = inputs[n];
+      DBStatementArgs args;
+      args.add(new DBLong(static_cast<long>(n + 1)));
+      args.add(new DBString(input));
+      unsigned long rowsAffected = 0;
+      require(db.executeUpdate("insert into txt(id,s) values (?,?)", args, rowsAffected),
+              "insert input " + to_string(n));
+
+      // what SQLite holds, from another connection: all the bytes, as text
+      requireStringEquals("text:" + to_string(input.size()) + ":" + hexOf(input),
+         rawFirstRow(path, "select typeof(s)||':'||length(cast(s as blob))||':'||hex(s) from txt where id = " +
+                           to_string(n + 1)),
+         "input " + to_string(n) + " as stored");
+   }
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      for (size_t n = 0; n < inputs.size(); ++n) {
+         const string& input = inputs[n];
+         const string label = when + ", input " + to_string(n) + " (" + to_string(input.size()) + " bytes)";
+         DBStatementArgs args;
+         args.add(new DBLong(static_cast<long>(n + 1)));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select s as txt from txt where id = ?", args));
+         require(rs && rs->next(), label + ": a row");
+         if (!rs) {
+            continue;
+         }
+
+         string byReference = "unchanged";
+         require(rs->stringForColumnIndex(0, byReference), label + ": string& is not NULL");
+         require(byReference == input, label + ": string& returns every byte (got " +
+                                       to_string(byReference.size()) + ")");
+
+         unique_ptr<string> byPointer(rs->stringForColumnIndex(0));
+         require(byPointer != nullptr, label + ": string* is not NULL");
+         require(byPointer && *byPointer == input, label + ": string* returns every byte");
+
+         string byName = "unchanged";
+         require(rs->stringForColumn("txt", byName), label + ": by name is not NULL");
+         require(byName == input, label + ": by name returns every byte");
+
+         unique_ptr<string> byNamePointer(rs->stringForColumn("txt"));
+         require(byNamePointer && *byNamePointer == input, label + ": by name, string*, every byte");
+      }
+   }
+   db.setShouldCacheStatements(true);
+
+   // NULL is still NULL, and still distinguishable from the empty string
+   require(exec(db, "insert into txt(id,s) values (100, NULL)"), "a NULL text");
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select s as txt from txt where id = 100"));
+   require(rs && rs->next(), "the NULL row");
+   if (rs) {
+      string value = "unchanged";
+      require(!rs->stringForColumnIndex(0, value), "NULL text: string& is false");
+      requireStringEquals("", value, "and the string is cleared");
+      unique_ptr<string> pointer(rs->stringForColumnIndex(0));
+      require(pointer == nullptr, "NULL text: string* is nullptr");
+      unique_ptr<string> byName(rs->stringForColumn("txt"));
+      require(byName == nullptr, "NULL text by name: string* is nullptr");
+   }
+   rs.reset();
+   db.close();
+}
+
+void TestSQLiteFoundation::test_null_empty_and_nonempty_blobs() {
+   TEST_CASE("test_null_empty_and_nonempty_blobs");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("blobs3.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table blobs(id integer primary key, b blob)"), "create table");
+
+   const string small("ab\0c", 4);
+   string big;
+   for (int i = 0; i < 70000; ++i) {
+      big.push_back(static_cast<char>((i * 31 + 7) % 256));
+   }
+
+   // the DBData class itself: nothing is copied for a zero length or no buffer
+   {
+      DBData fromEmptyBuffer(small.data(), 0);
+      requireLongEquals(0, fromEmptyBuffer.length(), "DBData(buffer, 0) is empty");
+      require(fromEmptyBuffer.value() == nullptr, "and has no data pointer");
+      DBData fromNoBuffer(nullptr, 5);
+      requireLongEquals(0, fromNoBuffer.length(), "DBData(nullptr, 5) is empty, not an invalid copy");
+      DBData sized(small.data(), small.size());
+      requireLongEquals(4, sized.length(), "DBData(buffer, 4) has 4 bytes");
+      require(::memcmp(sized.value(), small.data(), 4) == 0, "which are the bytes given");
+      DBData copy(fromEmptyBuffer);
+      DBData assigned;
+      assigned = sized;
+      requireLongEquals(0, copy.length(), "a copy of an empty DBData is empty");
+      requireLongEquals(4, assigned.length(), "an assigned DBData has the bytes");
+   }
+
+   struct Case {
+      long id;
+      const char* label;
+      DBAbstractDataType* value;      // null: a nullptr argument
+      const char* sqlValue;           // used instead when not null
+      string expectedStored;          // "<typeof>:<length or ->"
+      const string* expectedBytes;    // set when a non-empty blob is expected back
+   };
+   const Case cases[] = {
+      {1, "DBData with 4 bytes", new DBData(small.data(), small.size()), nullptr, "blob:4", &small},
+      {2, "DBData with an empty buffer", new DBData(small.data(), 0), nullptr, "blob:0", nullptr},
+      {3, "default DBData", new DBData(), nullptr, "blob:0", nullptr},
+      {4, "DBData(nullptr, 0)", new DBData(nullptr, 0), nullptr, "blob:0", nullptr},
+      {5, "DBNull", new DBNull("Data"), nullptr, "null:-", nullptr},
+      {6, "a nullptr argument", nullptr, nullptr, "null:-", nullptr},
+      {7, "SQL X''", nullptr, "X''", "blob:0", nullptr},
+      {8, "SQL zeroblob(0)", nullptr, "zeroblob(0)", "blob:0", nullptr},
+      {9, "SQL NULL", nullptr, "NULL", "null:-", nullptr},
+      {10, "70000 bytes", new DBData(big.data(), big.size()), nullptr, "blob:70000", &big},
+   };
+
+   for (const Case& c : cases) {
+      if (c.sqlValue != nullptr) {
+         require(exec(db, "insert into blobs(id,b) values (" + to_string(c.id) + "," + c.sqlValue + ")"),
+                 string("insert ") + c.label);
+      } else {
+         DBStatementArgs args;
+         args.add(new DBLong(c.id));
+         args.add(c.value);
+         unsigned long rowsAffected = 0;
+         require(db.executeUpdate("insert into blobs(id,b) values (?,?)", args, rowsAffected),
+                 string("insert ") + c.label);
+      }
+      requireStringEquals(c.expectedStored,
+         rawFirstRow(path, "select typeof(b)||':'||ifnull(length(b),'-') from blobs where id = " + to_string(c.id)),
+         string(c.label) + ": what SQLite stored");
+   }
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      for (const Case& c : cases) {
+         const string label = when + ", " + c.label;
+         const bool storedNull = (c.expectedStored.compare(0, 4, "null") == 0);
+         DBStatementArgs args;
+         args.add(new DBLong(c.id));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select b as payload from blobs where id = ?", args));
+         require(rs && rs->next(), label + ": a row");
+         if (!rs) {
+            continue;
+         }
+
+         require(rs->getTypeForColumnIndex(0) == (storedNull ? ValueTypeNull : ValueTypeBlob),
+                 label + ": column type");
+         unique_ptr<DBData> byIndex(rs->dataForColumnIndex(0));
+         unique_ptr<DBData> byName(rs->dataForColumn("payload"));
+         if (storedNull) {
+            require(byIndex == nullptr, label + ": NULL reads as nullptr (index)");
+            require(byName == nullptr, label + ": NULL reads as nullptr (name)");
+         } else {
+            require(byIndex != nullptr, label + ": a blob is never nullptr (index)");
+            require(byName != nullptr, label + ": a blob is never nullptr (name)");
+            const size_t expectedSize = (c.expectedBytes != nullptr) ? c.expectedBytes->size() : 0;
+            if (byIndex) {
+               requireLongEquals(static_cast<long long>(expectedSize), byIndex->length(),
+                                 label + ": length (index)");
+               if (c.expectedBytes != nullptr) {
+                  require(::memcmp(byIndex->value(), c.expectedBytes->data(), expectedSize) == 0,
+                          label + ": all the bytes (index)");
+               }
+            }
+            if (byName) {
+               requireLongEquals(static_cast<long long>(expectedSize), byName->length(),
+                                 label + ": length (name)");
+               if (c.expectedBytes != nullptr) {
+                  require(::memcmp(byName->value(), c.expectedBytes->data(), expectedSize) == 0,
+                          label + ": all the bytes (name)");
+               }
+            }
+         }
+      }
+   }
+   db.setShouldCacheStatements(true);
+
+   // reading did not change what is stored: the NULLs are still NULL, the empty blobs still empty blobs
+   requireStringEquals("5,6,9",
+      rawFirstRow(path, "select group_concat(id) from blobs where b is null"), "the NULL rows are unchanged");
+   requireStringEquals("2,3,4,7,8",
+      rawFirstRow(path, "select group_concat(id) from blobs where typeof(b) = 'blob' and length(b) = 0"),
+      "the empty blobs are unchanged");
+
+   // through a parameter, with nothing stored at all
+   for (int variant = 0; variant < 3; ++variant) {
+      DBStatementArgs args;
+      if (variant == 0) args.add(new DBData(nullptr, 0));
+      if (variant == 1) args.add(new DBNull("Data"));
+      if (variant == 2) args.add(nullptr);
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select ?", args));
+      require(rs && rs->next(), "select ? " + to_string(variant));
+      if (rs) {
+         require(rs->getTypeForColumnIndex(0) == (variant == 0 ? ValueTypeBlob : ValueTypeNull),
+                 "select ? " + to_string(variant) + ": an empty DBData is a blob, DBNull and nullptr are NULL");
+         unique_ptr<DBData> data(rs->dataForColumnIndex(0));
+         require((data == nullptr) == (variant != 0), "select ? " + to_string(variant) + ": nullptr only for NULL");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_null_dates() {
+   TEST_CASE("test_null_dates");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("dates.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table dates(id integer primary key, d real)"), "create table");
+
+   struct Case { long id; const char* label; DBAbstractDataType* value; const char* sqlValue; bool isNull; double seconds; };
+   const Case cases[] = {
+      {1, "the Unix epoch", new DBDate(0.0), nullptr, false, 0.0},
+      {2, "a positive date", new DBDate(1700000000.5), nullptr, false, 1700000000.5},
+      {3, "a date before the epoch", new DBDate(-86400.0), nullptr, false, -86400.0},
+      {4, "a far date", new DBDate(253402300799.0), nullptr, false, 253402300799.0},
+      {5, "DBNull", new DBNull("Date"), nullptr, true, 0.0},
+      {6, "a nullptr argument", nullptr, nullptr, true, 0.0},
+      {7, "SQL NULL", nullptr, "NULL", true, 0.0},
+      {8, "SQL integer seconds", nullptr, "1700000000", false, 1700000000.0},
+   };
+   for (const Case& c : cases) {
+      if (c.sqlValue != nullptr) {
+         require(exec(db, "insert into dates(id,d) values (" + to_string(c.id) + "," + c.sqlValue + ")"),
+                 string("insert ") + c.label);
+      } else {
+         DBStatementArgs args;
+         args.add(new DBLong(c.id));
+         args.add(c.value);
+         unsigned long rowsAffected = 0;
+         require(db.executeUpdate("insert into dates(id,d) values (?,?)", args, rowsAffected),
+                 string("insert ") + c.label);
+      }
+      requireStringEquals(c.isNull ? "null" : "real",
+         rawFirstRow(path, "select typeof(d) from dates where id = " + to_string(c.id)),
+         string(c.label) + ": stored type");
+   }
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      for (const Case& c : cases) {
+         const string label = when + ", " + c.label;
+         DBStatementArgs args;
+         args.add(new DBLong(c.id));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select d as moment from dates where id = ?", args));
+         require(rs && rs->next(), label + ": a row");
+         if (!rs) {
+            continue;
+         }
+         unique_ptr<DBDate> byIndex(rs->dateForColumnIndex(0));
+         unique_ptr<DBDate> byName(rs->dateForColumn("moment"));
+         if (c.isNull) {
+            require(byIndex == nullptr, label + ": SQL NULL is nullptr (index)");
+            require(byName == nullptr, label + ": SQL NULL is nullptr (name)");
+         } else {
+            require(byIndex != nullptr, label + ": a date is not nullptr (index)");
+            require(byName != nullptr, label + ": a date is not nullptr (name)");
+            if (byIndex) {
+               requireDoubleEquals(c.seconds, byIndex->timeIntervalSince1970(), label + ": seconds (index)");
+            }
+            if (byName) {
+               requireDoubleEquals(c.seconds, byName->timeIntervalSince1970(), label + ": seconds (name)");
+            }
+         }
+         unique_ptr<DBDate> unknown(rs->dateForColumn("no_such_column"));
+         require(unknown == nullptr, label + ": an unknown column is nullptr as before");
+      }
+   }
+   db.setShouldCacheStatements(true);
+   db.close();
+}
+
+void TestSQLiteFoundation::test_integer_accessors() {
+   TEST_CASE("test_integer_accessors");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("ints.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table ints(id integer primary key, i integer)"), "create table");
+
+   struct Case { long id; const char* label; const char* sql; long long value; };
+   const Case cases[] = {
+      {1, "0", "0", 0},
+      {2, "1", "1", 1},
+      {3, "-1", "-1", -1},
+      {4, "INT_MAX", "2147483647", INT_MAX},
+      {5, "INT_MIN", "-2147483648", INT_MIN},
+      {6, "INT_MAX + 1", "2147483648", 2147483648LL},
+      {7, "INT_MIN - 1", "-2147483649", -2147483649LL},
+      {8, "2^32", "4294967296", 4294967296LL},
+      {9, "2^32 + 5", "4294967301", 4294967301LL},
+      {10, "2^40", "1099511627776", 1099511627776LL},
+      {11, "INT64_MAX", "9223372036854775807", INT64_MAX},
+      {12, "INT64_MIN", "(-9223372036854775807 - 1)", INT64_MIN},
+   };
+   for (const Case& c : cases) {
+      require(exec(db, "insert into ints(id,i) values (" + to_string(c.id) + "," + c.sql + ")"),
+              string("insert ") + c.label);
+      requireStringEquals("integer:" + to_string(c.value),
+         rawFirstRow(path, "select typeof(i)||':'||i from ints where id = " + to_string(c.id)),
+         string(c.label) + ": stored as an INTEGER");
+   }
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      for (const Case& c : cases) {
+         const string label = when + ", " + c.label;
+         DBStatementArgs args;
+         args.add(new DBLong(c.id));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select i as num from ints where id = ?", args));
+         require(rs && rs->next(), label + ": a row");
+         if (!rs) {
+            continue;
+         }
+         const int saturated = expectedSaturated(c.value);
+         const bool fits = (saturated == c.value);
+
+         requireLongEquals(saturated, rs->intForColumnIndex(0), label + ": int (index) saturates, never wraps");
+         requireLongEquals(saturated, rs->intForColumn("num"), label + ": int (name) saturates, never wraps");
+         requireLongEquals(c.value, rs->int64ForColumnIndex(0), label + ": int64 (index) is exact");
+         requireLongEquals(c.value, rs->int64ForColumn("num"), label + ": int64 (name) is exact");
+         require(rs->boolForColumnIndex(0) == (c.value != 0), label + ": bool (index)");
+         require(rs->boolForColumn("num") == (c.value != 0), label + ": bool (name)");
+
+         int checked = 99;
+         require(rs->intForColumnIndex(0, checked) == fits, label + ": checked (index) succeeds only if it fits");
+         requireLongEquals(fits ? c.value : 0, checked, label + ": checked (index) value, 0 on failure");
+         checked = 99;
+         require(rs->intForColumn("num", checked) == fits, label + ": checked (name) succeeds only if it fits");
+         requireLongEquals(fits ? c.value : 0, checked, label + ": checked (name) value, 0 on failure");
+
+         // a failed conversion is not a failure of the result set
+         require(rs->status() == DBResultSetStatus::Row, label + ": the status is untouched");
+      }
+   }
+   db.setShouldCacheStatements(true);
+
+   // the other SQLite types: converted as before (saturating), refused by the checked accessor
+   struct Other { const char* sql; const char* label; int expectedInt; long long expectedInt64; };
+   const Other others[] = {
+      {"select 42.0 as v", "REAL 42.0", 42, 42},
+      {"select 3.5 as v", "REAL 3.5", 3, 3},
+      {"select -3.5 as v", "REAL -3.5", -3, -3},
+      {"select 3.0e10 as v", "REAL 3.0e10", INT_MAX, 30000000000LL},
+      {"select -3.0e10 as v", "REAL -3.0e10", INT_MIN, -30000000000LL},
+      {"select 1e300 as v", "REAL 1e300", INT_MAX, INT64_MAX},
+      {"select '42' as v", "TEXT '42'", 42, 42},
+      {"select '4294967297' as v", "TEXT '4294967297'", INT_MAX, 4294967297LL},
+      {"select 'abc' as v", "TEXT 'abc'", 0, 0},
+      {"select NULL as v", "NULL", 0, 0},
+      {"select X'2A' as v", "BLOB X'2A'", 0, 0},
+   };
+   for (const Other& o : others) {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, o.sql));
+      require(rs && rs->next(), string(o.label) + ": a row");
+      if (!rs) {
+         continue;
+      }
+      requireLongEquals(o.expectedInt, rs->intForColumnIndex(0), string(o.label) + ": int");
+      requireLongEquals(o.expectedInt64, rs->int64ForColumnIndex(0), string(o.label) + ": int64");
+      int checked = 99;
+      require(!rs->intForColumnIndex(0, checked), string(o.label) + ": the checked accessor refuses it");
+      requireLongEquals(0, checked, string(o.label) + ": and sets the value to 0");
+      checked = 99;
+      require(!rs->intForColumn("v", checked), string(o.label) + ": by name too");
+      requireLongEquals(0, checked, string(o.label) + ": with 0 as the value");
+      require(rs->status() == DBResultSetStatus::Row, string(o.label) + ": the status is untouched");
+   }
+
+   {
+      // unknown column or index
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select 7 as v"));
+      require(rs && rs->next(), "a row");
+      if (rs) {
+         int checked = 99;
+         require(!rs->intForColumn("nope", checked), "an unknown column is refused");
+         requireLongEquals(0, checked, "with 0 as the value");
+         checked = 99;
+         require(!rs->intForColumnIndex(5, checked), "a column index that does not exist is refused");
+         requireLongEquals(0, checked, "with 0 as the value");
+         checked = 99;
+         require(!rs->intForColumnIndex(-1, checked), "a negative column index is refused");
+         requireLongEquals(0, checked, "with 0 as the value");
+         requireLongEquals(0, rs->int64ForColumn("nope"), "int64 of an unknown column is 0");
+         require(rs->status() == DBResultSetStatus::Row, "and none of it touched the status");
+         int ok = 99;
+         require(rs->intForColumn("v", ok) && ok == 7, "while a real INTEGER passes");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_boolean_conversion_of_wide_integers() {
+   TEST_CASE("test_boolean_conversion_of_wide_integers");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("bools.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   struct Case { const char* sql; const char* label; bool expected; };
+   const Case cases[] = {
+      {"select 0 as v", "0", false},
+      {"select 1 as v", "1", true},
+      {"select -1 as v", "-1", true},
+      {"select 4294967296 as v", "2^32 (low 32 bits are zero)", true},
+      {"select 1099511627776 as v", "2^40 (low 32 bits are zero)", true},
+      {"select (-9223372036854775807 - 1) as v", "INT64_MIN (low 32 bits are zero)", true},
+      {"select 9223372036854775807 as v", "INT64_MAX", true},
+      {"select 0.0 as v", "REAL 0.0", false},
+      {"select 0.5 as v", "REAL 0.5 (truncates to 0, as before)", false},
+      {"select 2.0 as v", "REAL 2.0", true},
+      {"select '0' as v", "TEXT '0'", false},
+      {"select '7' as v", "TEXT '7'", true},
+      {"select 'abc' as v", "TEXT 'abc'", false},
+      {"select NULL as v", "NULL", false},
+   };
+   for (const Case& c : cases) {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, c.sql));
+      require(rs && rs->next(), string(c.label) + ": a row");
+      if (rs) {
+         require(rs->boolForColumnIndex(0) == c.expected, string(c.label) + ": bool (index)");
+         require(rs->boolForColumn("v") == c.expected, string(c.label) + ": bool (name)");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_float_binding_is_exact_promotion() {
+   TEST_CASE("test_float_binding_is_exact_promotion");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("floats.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table f(id integer primary key, x real)"), "create table");
+
+   const float tenth = 0.1f;
+   struct Case { long id; const char* label; DBAbstractDataType* value; double expected; };
+   const Case cases[] = {
+      {1, "DBFloat(0.1f)", new DBFloat(0.1f), static_cast<double>(tenth)},
+      {2, "DBDouble(0.1)", new DBDouble(0.1), 0.1},
+      {3, "DBFloat(0.5f), exactly representable", new DBFloat(0.5f), 0.5},
+      {4, "DBDouble((double) 0.1f)", new DBDouble(static_cast<double>(tenth)), static_cast<double>(tenth)},
+      {5, "DBFloat(16777217.0f), which is 16777216 as a float", new DBFloat(16777217.0f), 16777216.0},
+   };
+   for (const Case& c : cases) {
+      DBStatementArgs args;
+      args.add(new DBLong(c.id));
+      args.add(c.value);
+      unsigned long rowsAffected = 0;
+      require(db.executeUpdate("insert into f(id,x) values (?,?)", args, rowsAffected), string("insert ") + c.label);
+
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select x from f where id = " + to_string(c.id)));
+      require(rs && rs->next(), string(c.label) + ": a row");
+      if (rs) {
+         requireDoubleEquals(c.expected, rs->doubleForColumnIndex(0), string(c.label) + ": the double that was stored");
+         require(rs->getTypeForColumnIndex(0) == ValueTypeFloat, string(c.label) + ": a REAL");
+      }
+   }
+
+   // a float survives the round trip unchanged
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select x from f where id = 1"));
+      require(rs && rs->next() && static_cast<float>(rs->doubleForColumnIndex(0)) == tenth,
+              "the float read back is the float stored");
+   }
+   // and the documented consequence: it is not the double 0.1
+   requireStringEquals("2", rawFirstRow(path, "select group_concat(id) from f where x = 0.1"),
+                       "only the DBDouble(0.1) row equals the decimal literal 0.1");
+   requireStringEquals("1,4", rawFirstRow(path, "select group_concat(id) from f where x = 0.10000000149011612"),
+                       "while DBFloat(0.1f) equals the double it was promoted to");
+
+   // binding the same float without Chapeau stores the same value
+   {
+      sqlite3* handle = nullptr;
+      require(sqlite3_open(path.c_str(), &handle) == SQLITE_OK, "a raw connection");
+      sqlite3_stmt* stmt = nullptr;
+      sqlite3_prepare_v2(handle, "insert into f(id,x) values (100, ?)", -1, &stmt, nullptr);
+      sqlite3_bind_double(stmt, 1, tenth);
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+      sqlite3_close(handle);
+      requireStringEquals("1", rawFirstRow(path, "select (select x from f where id = 100) = (select x from f where id = 1)"),
+                          "a plain sqlite3_bind_double of 0.1f stores exactly what DBFloat does");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_legacy_result_set_subclass_still_works() {
+   TEST_CASE("test_legacy_result_set_subclass_still_works");
+   // LegacyResultSet (above) overrides only the original pure virtuals. That it
+   // compiles at all is the source-compatibility check; this is what it does.
+   LegacyResultSet legacy;
+   DBResultSet& base = legacy;
+
+   legacy.storedLong = 123456;
+   legacy.storedType = ValueTypeInteger;
+   requireLongEquals(123456, base.int64ForColumnIndex(0), "int64 defaults to the long accessor (index)");
+   requireLongEquals(123456, base.int64ForColumn("any"), "int64 defaults to the long accessor (name)");
+   int value = 99;
+   require(base.intForColumnIndex(0, value), "the checked accessor works on top of getTypeForColumnIndex()");
+   requireLongEquals(123456, value, "with the value");
+
+   legacy.storedType = ValueTypeNull;
+   value = 99;
+   require(!base.intForColumnIndex(0, value), "NULL is refused");
+   requireLongEquals(0, value, "with 0");
+
+   legacy.storedType = ValueTypeFloat;
+   value = 99;
+   require(!base.intForColumnIndex(0, value), "a REAL is refused");
+
+   legacy.storedType = ValueTypeInteger;
+   legacy.storedLong = 0;
+   value = 99;
+   require(base.intForColumnIndex(0, value) && value == 0, "an INTEGER 0 is accepted");
+
+   value = 99;
+   require(!base.intForColumn("by name", value), "by name: a class that cannot look names up refuses");
+   requireLongEquals(0, value, "with 0");
+
+   require(base.status() == DBResultSetStatus::Ready, "status() defaults to Ready (H1a-4)");
+   requireLongEquals(0, base.lastErrorCode(), "lastErrorCode() defaults to 0 (H1a-4)");
 }

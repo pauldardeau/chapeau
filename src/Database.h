@@ -2,6 +2,7 @@
 #define CHAPEAU_DATABASE_H
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <string>
 #include <vector>
@@ -494,18 +495,58 @@ public:
    virtual int lastErrorCode() const;
 
    /**
-    *
+    * The column as an int. A SQLite INTEGER outside the range of int
+    * saturates to INT_MIN or INT_MAX; it never wraps. NULL reads as 0, and
+    * REAL and TEXT values are converted as SQLite converts them (saturating
+    * the same way). To tell NULL, a value that did not fit, or a value that is
+    * not an integer apart, use the checked overload below.
     * @param columnName
     * @return
     */
    virtual int intForColumn(const std::string& columnName) const = 0;
 
    /**
-    *
+    * The column as an int (see intForColumn).
     * @param columnIndex
     * @return
     */
    virtual int intForColumnIndex(int columnIdx) const = 0;
+
+   /**
+    * The column as a 64-bit integer, whatever the platform's long is.
+    * The default implementation forwards to longForColumn(); a subclass whose
+    * values can be wider than long overrides it.
+    * @param columnName
+    * @return
+    */
+   virtual std::int64_t int64ForColumn(const std::string& columnName) const;
+
+   /**
+    * The column as a 64-bit integer (see int64ForColumn).
+    * @param columnIdx
+    * @return
+    */
+   virtual std::int64_t int64ForColumnIndex(int columnIdx) const;
+
+   /**
+    * The column as an int, if it holds one.
+    * @param columnName
+    * @param value set to the value, or to 0 when this returns false
+    * @return true only for an INTEGER value within the range of int; false for
+    * NULL, REAL, TEXT, BLOB, an unknown column and an integer that does not
+    * fit. It does not change the status of the result set. The default
+    * implementation returns false: a subclass that can look a column up by
+    * name overrides it.
+    */
+   virtual bool intForColumn(const std::string& columnName, int& value) const;
+
+   /**
+    * The column as an int, if it holds one (see the overload above).
+    * @param columnIdx
+    * @param value set to the value, or to 0 when this returns false
+    * @return true only for an INTEGER value within the range of int
+    */
+   virtual bool intForColumnIndex(int columnIdx, int& value) const;
 
    /**
     *
@@ -550,58 +591,66 @@ public:
    virtual double doubleForColumnIndex(int columnIdx) const = 0;
 
    /**
-    *
+    * The column as text, with all its bytes (NUL bytes included).
     * @param columnName
-    * @return
+    * @return a new string the caller deletes, or nullptr for SQL NULL
     */
    virtual std::string* stringForColumn(const std::string& columnName) const = 0;
 
    /**
-    *
+    * The column as text, with all its bytes (NUL bytes included).
     * @param columnIdx
-    * @return
+    * @return a new string the caller deletes, or nullptr for SQL NULL
     */
    virtual std::string* stringForColumnIndex(int columnIdx) const = 0;
 
    /**
-    *
+    * The column as text, with all its bytes (NUL bytes included).
     * @param columnName
-    * @return
+    * @param s the text, or "" when this returns false
+    * @return false for SQL NULL
     */
    virtual bool stringForColumn(const std::string& columnName, std::string& s) const = 0;
 
    /**
-    *
+    * The column as text, with all its bytes (NUL bytes included).
     * @param columnIdx
-    * @return
+    * @param s the text, or "" when this returns false
+    * @return false for SQL NULL
     */
    virtual bool stringForColumnIndex(int columnIdx, std::string& s) const = 0;
 
    /**
-    *
+    * The column as a date: seconds since the Unix epoch.
     * @param columnName
-    * @return
+    * @return a new date the caller deletes; nullptr for SQL NULL, for an
+    * unknown column and for a result set that has ended. The epoch itself is a
+    * non-null DBDate of 0.0.
     */
    virtual DBDate* dateForColumn(const std::string& columnName) const = 0;
 
    /**
-    *
+    * The column as a date: seconds since the Unix epoch.
     * @param columnIdx
-    * @return
+    * @return a new date the caller deletes; nullptr for SQL NULL and for a
+    * result set that has ended. The epoch itself is a non-null DBDate of 0.0.
     */
    virtual DBDate* dateForColumnIndex(int columnIdx) const = 0;
 
    /**
-    *
+    * The column as a blob.
     * @param columnName
-    * @return
+    * @return a new DBData the caller deletes; nullptr for SQL NULL, for an
+    * unknown column and for a result set that has ended. A zero-length blob is
+    * a non-null, empty DBData.
     */
    virtual DBData* dataForColumn(const std::string& columnName) const = 0;
 
    /**
-    *
+    * The column as a blob.
     * @param columnIdx
-    * @return
+    * @return a new DBData the caller deletes; nullptr for SQL NULL and for a
+    * result set that has ended. A zero-length blob is a non-null, empty DBData.
     */
    virtual DBData* dataForColumnIndex(int columnIdx) const = 0;
 
