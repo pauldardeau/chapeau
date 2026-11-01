@@ -19,14 +19,23 @@ class Date;
 /**
  * A cursor over the rows produced by one query.
  *
- * Lifetime: a result set may be destroyed at any time, before or after the
- * database it came from. When the database is closed or destroyed first, the
- * result set becomes invalid: next() returns false, and every column accessor
- * returns what it returns for a NULL column (0, false, 0.0, nullptr/false for
- * strings, an empty DBData, a DBDate of 0.0, getColumnCount() 0,
- * ValueTypeNull, columnIndexForName() -1). Turning statement caching off does
- * not affect a live result set. Single-threaded: a result set and its
- * database must not be used from different threads at the same time.
+ * A result set is active until it ends, and has exclusive use of its prepared
+ * statement while it is: another result set over the same SQL, even with the
+ * same parameters, runs on a statement of its own and the two do not disturb
+ * each other.
+ *
+ * It ends, for good, when next() returns false (the data is exhausted, or an
+ * error or busy-timeout stopped it), when close() is called, or when the
+ * database it came from is closed or destroyed. An ended result set has let go
+ * of its statement: next() keeps returning false (the query never restarts),
+ * close() may be repeated, and every column accessor returns what it returns
+ * for a NULL column (0, false, 0.0, nullptr/false for strings, an empty
+ * DBData, a DBDate of 0.0, getColumnCount() 0, ValueTypeNull,
+ * columnIndexForName() -1). A result set may be destroyed at any time, before
+ * or after the database it came from, and is not revived by the database
+ * being opened again. Turning statement caching off does not affect an active
+ * result set. Single-threaded: a result set and its database must not be used
+ * from different threads at the same time.
  */
 class SQLiteResultSet : public DBResultSet {
 
@@ -47,9 +56,10 @@ public:
    ~SQLiteResultSet();
 
    /**
-    * Ends the iteration: resets the statement and, if the result set is its
-    * only owner, deletes it. Safe to call more than once, and safe after the
-    * database was closed or destroyed (then there is nothing left to do).
+    * Ends the iteration: lets go of the statement (reset, with its bound
+    * values cleared; deleted if no one else owns it and the cache does not).
+    * Safe to call more than once, and safe after the database was closed or
+    * destroyed (then there is nothing left to do).
     */
    void close();
 
@@ -62,7 +72,8 @@ public:
 
    /**
     *
-    * @return
+    * @return the statement this result set is using, or nullptr once the
+    * result set has ended (see the class comment)
     * @see SQLiteStatement()
     */
    SQLiteStatement* statement();
@@ -241,7 +252,6 @@ private:
    SQLiteStatement* m_statement;
    mutable std::map<std::string, int> m_columnNameToIndexMap;
    mutable bool m_columnNamesSetup;
-   bool m_invalidated;
 
    SQLiteResultSet();
    SQLiteResultSet(const SQLiteResultSet&);

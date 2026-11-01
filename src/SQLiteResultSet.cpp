@@ -19,8 +19,7 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
                                  const std::string& query) :
    m_parentDB(db),
    m_statement(statement),
-   m_columnNamesSetup(false),
-   m_invalidated(false) {
+   m_columnNamesSetup(false) {
    setQuery(query);
 
    if (m_statement != nullptr) {
@@ -50,9 +49,16 @@ void SQLiteResultSet::releaseStatement() {
    m_statement = nullptr;
 
    if (statement != nullptr) {
-      // the last user deletes a statement that the cache does not own
-      if (statement->detachCursor() == 0 && !statement->isCached()) {
-         delete statement;
+      if (statement->detachCursor() == 0) {
+         // the last user leaves the statement idle: no half-run execution,
+         // no values bound for this execution
+         statement->reset();
+         statement->clearBindings();
+
+         // and deletes (so finalizes) one that the cache does not own
+         if (!statement->isCached()) {
+            delete statement;
+         }
       }
    }
 }
@@ -60,12 +66,10 @@ void SQLiteResultSet::releaseStatement() {
 //******************************************************************************
 
 void SQLiteResultSet::close() {
-   if (m_statement != nullptr) {
-      m_statement->reset();
-      if (!m_statement->isCached()) {
-         releaseStatement();
-      }
-   }
+   // ends the iteration for good: once the statement is released there is
+   // nothing left to step, so next() stays false and the query cannot restart
+   releaseStatement();
+
    if (m_parentDB != nullptr) {
       m_parentDB->setInUse(false);
    }
@@ -76,12 +80,8 @@ void SQLiteResultSet::close() {
 void SQLiteResultSet::invalidate() {
    // the database is closing or being destroyed: it has already taken this
    // result set out of its own list, and must not be called back
-   if (m_statement != nullptr) {
-      m_statement->reset();
-      releaseStatement();
-   }
+   releaseStatement();
    m_parentDB = nullptr;
-   m_invalidated = true;
    m_columnNameToIndexMap.clear();
    m_columnNamesSetup = false;
 }
@@ -120,8 +120,10 @@ void SQLiteResultSet::setupColumnNames() const {
 //******************************************************************************
 
 bool SQLiteResultSet::next() {
-   if (m_invalidated) {
-      // the database was closed or destroyed: no statement, no parent
+   sqlite3_stmt* const stmt = sqliteStatement();
+   if (stmt == nullptr || m_parentDB == nullptr) {
+      // exhausted, closed, or invalidated by the database closing: there is
+      // nothing to step, and there never will be again
       return false;
    }
 
@@ -133,7 +135,7 @@ bool SQLiteResultSet::next() {
    do {
       retry = false;
 
-      rc = sqlite3_step(m_statement->statement());
+      rc = sqlite3_step(stmt);
 
       if (SQLITE_BUSY == rc) {
          // this will happen if the db is locked, like if we are doing an update or insert.

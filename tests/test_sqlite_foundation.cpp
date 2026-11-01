@@ -101,6 +101,15 @@ void TestSQLiteFoundation::runTests() {
    test_cursor_invalid_after_reopen();
    test_temporary_text_arguments();
    test_temporary_blob_arguments();
+   test_two_cursors_identical_sql();
+   test_two_cursors_parameterized_sql();
+   test_close_one_cursor_while_another_is_active();
+   test_statement_reuse_after_cursor_destroyed();
+   test_incorrect_argument_counts();
+   test_arguments_then_none_then_arguments();
+   test_cursor_exhaustion_is_terminal();
+   test_cache_disabled_with_several_active_cursors();
+   test_update_while_cursor_owns_same_sql();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -1069,5 +1078,554 @@ void TestSQLiteFoundation::test_temporary_blob_arguments() {
    }
    requireLongEquals(2, scalar(db, "select count(*) from blobs where typeof(b) = 'blob' and length(b) = 4096"),
                      "both blobs are stored as 4096-byte blobs");
+   db.close();
+}
+
+// ---- prepared statement and cursor correctness (CH-03, CH-04, CH-05) -------
+
+namespace {
+
+// how many sqlite3 statements are open (prepared and not finalized) on the
+// connection: cached ones, and the ones active result sets are running
+int openStatementCount(SQLiteDatabase& db) {
+   if (db.sqliteHandle() == nullptr) {
+      return -1;
+   }
+   int count = 0;
+   for (sqlite3_stmt* s = sqlite3_next_stmt(db.sqliteHandle(), nullptr);
+        s != nullptr;
+        s = sqlite3_next_stmt(db.sqliteHandle(), s)) {
+      ++count;
+   }
+   return count;
+}
+
+// the items table, created with caching off so that the statements used to
+// fill it are not left in the cache: the connection starts with none open
+bool createItemsWithoutCachedStatements(SQLiteDatabase& db) {
+   db.setShouldCacheStatements(false);
+   const bool ok = createItems(db);
+   db.setShouldCacheStatements(true);
+   return ok;
+}
+
+string firstText(SQLiteResultSet& rs) {
+   string value;
+   rs.stringForColumnIndex(0, value);
+   return value;
+}
+
+}
+
+void TestSQLiteFoundation::test_two_cursors_identical_sql() {
+   TEST_CASE("test_two_cursors_identical_sql");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("two_cursors.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      requireLongEquals(0, openStatementCount(db), when + ": no statement is open to begin with");
+
+      {
+         unique_ptr<SQLiteResultSet> r1(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> r2(openCursor(db, ITEMS_BY_ID));
+         require(r1 && r2, when + ": two cursors over identical SQL");
+         requireLongEquals(2, openStatementCount(db),
+                           when + ": each active cursor has a statement of its own");
+         if (r1 && r2) {
+            // interleaved: each cursor has its own position
+            require(r1->next(), when + ": r1 row 1");
+            requireLongEquals(1, r1->intForColumnIndex(0), when + ": r1 id");
+            require(r2->next(), when + ": r2 row 1");
+            requireLongEquals(1, r2->intForColumnIndex(0), when + ": r2 starts at the first row");
+            require(r1->next(), when + ": r1 row 2");
+            requireLongEquals(2, r1->intForColumnIndex(0), when + ": r1 second id");
+            require(r2->next(), when + ": r2 row 2");
+            requireLongEquals(2, r2->intForColumnIndex(0), when + ": r2 second id");
+            require(r1->next(), when + ": r1 row 3");
+            requireLongEquals(3, r1->intForColumnIndex(0), when + ": r1 third id");
+            require(!r1->next(), when + ": r1 is exhausted");
+
+            // r1 ending does not disturb r2
+            require(r2->next(), when + ": r2 row 3 after r1 ended");
+            requireLongEquals(3, r2->intForColumnIndex(0), when + ": r2 third id");
+            require(!r2->next(), when + ": r2 is exhausted");
+         }
+         // both ended: a cached statement stays for reuse, the other is gone
+         requireLongEquals(pass == 0 ? 1 : 0, openStatementCount(db),
+                           when + ": statements left once both ended");
+      }
+      requireLongEquals(pass == 0 ? 1 : 0, openStatementCount(db),
+                        when + ": statements left once both are destroyed");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_two_cursors_parameterized_sql() {
+   TEST_CASE("test_two_cursors_parameterized_sql");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("two_param_cursors.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   const char* const sql = "select name from items where id >= ? order by id";
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      // same SQL, different arguments, both arguments gone before stepping
+      auto from1 = make_unique<DBStatementArgs>();
+      from1->add(new DBLong(1));
+      unique_ptr<SQLiteResultSet> r1(openCursor(db, sql, *from1));
+      from1.reset();
+
+      auto from3 = make_unique<DBStatementArgs>();
+      from3->add(new DBLong(3));
+      unique_ptr<SQLiteResultSet> r2(openCursor(db, sql, *from3));
+      from3.reset();
+
+      require(r1 && r2, when + ": two cursors over identical parameterized SQL");
+      if (!r1 || !r2) {
+         continue;
+      }
+      require(r1->next(), when + ": r1 row 1");
+      requireStringEquals("apple", firstText(*r1), when + ": r1 first row");
+      require(r2->next(), when + ": r2 row 1");
+      requireStringEquals("cherry", firstText(*r2), when + ": r2 sees only id >= 3");
+      require(r1->next(), when + ": r1 row 2");
+      requireStringEquals("banana", firstText(*r1), when + ": r1 second row");
+      require(!r2->next(), when + ": r2 has just the one row");
+      require(r1->next(), when + ": r1 row 3");
+      requireStringEquals("cherry", firstText(*r1), when + ": r1 third row");
+      require(!r1->next(), when + ": r1 is exhausted");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_close_one_cursor_while_another_is_active() {
+   TEST_CASE("test_close_one_cursor_while_another_is_active");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("close_one.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      {
+         // close the second cursor while the first is part way through
+         unique_ptr<SQLiteResultSet> r1(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> r2(openCursor(db, ITEMS_BY_ID));
+         require(r1 && r2 && r1->next() && r2->next() && r2->next(), when + ": both under way");
+         if (r1 && r2) {
+            requireLongEquals(1, r1->intForColumnIndex(0), when + ": r1 id before the close");
+            r2->close();
+            require(!r2->next(), when + ": the closed cursor is finished");
+            require(r1->next(), when + ": r1 continues");
+            requireLongEquals(2, r1->intForColumnIndex(0), when + ": r1 is where it was");
+            require(r1->next(), when + ": r1 continues to the end");
+            requireLongEquals(3, r1->intForColumnIndex(0), when + ": r1 third id");
+            require(!r1->next(), when + ": r1 ends");
+         }
+      }
+
+      {
+         // and the other way round: close the first while the second runs on
+         unique_ptr<SQLiteResultSet> r1(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> r2(openCursor(db, ITEMS_BY_ID));
+         require(r1 && r2 && r1->next() && r2->next(), when + ": both under way again");
+         if (r1 && r2) {
+            r1->close();
+            require(r2->next(), when + ": r2 continues after r1 closed");
+            requireLongEquals(2, r2->intForColumnIndex(0), when + ": r2 second id");
+
+            // a third cursor starts from the beginning, whatever r2 is doing
+            unique_ptr<SQLiteResultSet> r3(openCursor(db, ITEMS_BY_ID));
+            require(r3 && r3->next(), when + ": a third cursor");
+            if (r3) {
+               requireLongEquals(1, r3->intForColumnIndex(0), when + ": r3 starts at the first row");
+            }
+            require(r2->next(), when + ": r2 is not disturbed by r3");
+            requireLongEquals(3, r2->intForColumnIndex(0), when + ": r2 third id");
+         }
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_reuse_after_cursor_destroyed() {
+   TEST_CASE("test_statement_reuse_after_cursor_destroyed");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("reuse.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+   db.setShouldCacheStatements(true);
+
+   for (int round = 0; round < 3; ++round) {
+      const string when = "round " + to_string(round);
+
+      {
+         // destroyed part way through
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         require(rs && rs->next(), when + ": a row");
+         if (rs) {
+            requireLongEquals(1, rs->intForColumnIndex(0), when + ": starts at the first row");
+         }
+      }
+      requireLongEquals(1, openStatementCount(db),
+                        when + ": the statement is kept, idle, in the cache");
+
+      {
+         // and again after running to the end
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         int rows = 0;
+         while (rs && rows < 3 && rs->next()) {
+            ++rows;
+            requireLongEquals(rows, rs->intForColumnIndex(0), when + ": id in a full pass");
+         }
+         requireLongEquals(3, rows, when + ": all rows");
+         require(rs && !rs->next(), when + ": ended");
+      }
+      requireLongEquals(1, openStatementCount(db),
+                        when + ": still the one cached statement, reused");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_incorrect_argument_counts() {
+   TEST_CASE("test_incorrect_argument_counts");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("arg_counts.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   const char* const querySql = "select ?, ?";
+   const char* const updateSql = "update items set qty = ? where id = ?";
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      for (int attempt = 0; attempt < 2; ++attempt) {
+         const string label = when + ", attempt " + to_string(attempt);
+
+         DBStatementArgs tooFew;
+         tooFew.add(new DBLong(1));
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, querySql, tooFew));
+         require(rs == nullptr, label + ": too few arguments are refused");
+
+         DBStatementArgs tooMany;
+         tooMany.add(new DBLong(1));
+         tooMany.add(new DBLong(2));
+         tooMany.add(new DBLong(3));
+         rs.reset(openCursor(db, querySql, tooMany));
+         require(rs == nullptr, label + ": too many arguments are refused");
+
+         // the same SQL still works, with the right values
+         DBStatementArgs right;
+         right.add(new DBLong(5 + attempt));
+         right.add(new DBLong(6 + attempt));
+         rs.reset(openCursor(db, querySql, right));
+         require(rs && rs->next(), label + ": the right number of arguments works");
+         if (rs) {
+            requireLongEquals(5 + attempt, rs->longForColumnIndex(0), label + ": first value");
+            requireLongEquals(6 + attempt, rs->longForColumnIndex(1), label + ": second value");
+         }
+      }
+
+      {
+         // arguments for SQL that takes none, then the plain call
+         DBStatementArgs extra;
+         extra.add(new DBLong(1));
+         unique_ptr<SQLiteResultSet> rs(
+            openCursor(db, "select count(*) from items", extra));
+         require(rs == nullptr, when + ": an argument for SQL without parameters is refused");
+         rs.reset(openCursor(db, "select count(*) from items"));
+         require(rs && rs->next(), when + ": the plain call works");
+         if (rs) {
+            requireLongEquals(3, rs->longForColumnIndex(0), when + ": count");
+         }
+      }
+
+      // updates: a refused call executes nothing, and does not disturb the next
+      unsigned long rowsAffected = 99;
+      DBStatementArgs onlyQty;
+      onlyQty.add(new DBLong(7));
+      require(!db.executeUpdate(updateSql, onlyQty, rowsAffected),
+              when + ": update with too few arguments is refused");
+      requireLongEquals(0, rowsAffected, when + ": and reports no rows");
+
+      DBStatementArgs three;
+      three.add(new DBLong(7));
+      three.add(new DBLong(2));
+      three.add(new DBLong(2));
+      rowsAffected = 99;
+      require(!db.executeUpdate(updateSql, three, rowsAffected),
+              when + ": update with too many arguments is refused");
+      requireLongEquals(12, scalar(db, "select qty from items where id = 2"),
+                        when + ": nothing was updated by the refused calls");
+
+      DBStatementArgs good;
+      good.add(new DBLong(99));
+      good.add(new DBLong(2));
+      require(db.executeUpdate(updateSql, good, rowsAffected), when + ": update with the right arguments");
+      requireLongEquals(1, rowsAffected, when + ": one row updated");
+      requireLongEquals(99, scalar(db, "select qty from items where id = 2"), when + ": new qty");
+
+      DBStatementArgs fewAgain;
+      fewAgain.add(new DBLong(7));
+      require(!db.executeUpdate(updateSql, fewAgain, rowsAffected),
+              when + ": refused again after a successful call");
+      requireLongEquals(99, scalar(db, "select qty from items where id = 2"),
+                        when + ": the refused call left the value alone");
+
+      DBStatementArgs restore;
+      restore.add(new DBLong(12));
+      restore.add(new DBLong(2));
+      require(db.executeUpdate(updateSql, restore, rowsAffected), when + ": restore the value");
+      requireLongEquals(12, scalar(db, "select qty from items where id = 2"), when + ": restored");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_arguments_then_none_then_arguments() {
+   TEST_CASE("test_arguments_then_none_then_arguments");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("args_noargs.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      // query: args -> no args -> args -> no args -> args
+      const char* const sql = "select ?";
+      const long long values[] = {7, 9, 11};
+      for (int i = 0; i < 3; ++i) {
+         {
+            DBStatementArgs args;
+            args.add(new DBLong(values[i]));
+            unique_ptr<SQLiteResultSet> rs(openCursor(db, sql, args));
+            require(rs && rs->next(), when + ": query with arguments, step " + to_string(i));
+            if (rs) {
+               requireLongEquals(values[i], rs->longForColumnIndex(0),
+                                 when + ": value for step " + to_string(i));
+            }
+         }
+         if (i < 2) {
+            unique_ptr<SQLiteResultSet> bare(openCursor(db, sql));
+            require(bare == nullptr, when + ": the no-argument call on SQL with a parameter is refused");
+         }
+      }
+      requireLongEquals(pass == 0 ? 1 : 0, openStatementCount(db),
+                        when + ": the cached statement is intact, an uncached one left nothing behind");
+
+      // update: args -> no args -> args
+      const char* const updateSql = "insert into items(id,name) values (?,?)";
+      unsigned long rowsAffected = 99;
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(10 + pass * 10));
+         args.add(new DBString("ten"));
+         require(db.executeUpdate(updateSql, args, rowsAffected), when + ": insert with arguments");
+         requireLongEquals(1, rowsAffected, when + ": one row inserted");
+      }
+      rowsAffected = 99;
+      require(!db.executeUpdate(updateSql, rowsAffected),
+              when + ": the no-argument update on SQL with parameters is refused");
+      requireLongEquals(0, rowsAffected, when + ": and inserts nothing");
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(11 + pass * 10));
+         args.add(new DBString("eleven"));
+         require(db.executeUpdate(updateSql, args, rowsAffected),
+                 when + ": insert with arguments after the refused call");
+         requireLongEquals(1, rowsAffected, when + ": one row inserted again");
+      }
+      requireLongEquals(3 + 2 * (pass + 1), scalar(db, "select count(*) from items"),
+                        when + ": exactly the two valid inserts of this pass were stored");
+      requireLongEquals(1, scalar(db, "select count(*) from items where name = 'eleven' and id = " +
+                                      to_string(11 + pass * 10)),
+                        when + ": with the right values");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cursor_exhaustion_is_terminal() {
+   TEST_CASE("test_cursor_exhaustion_is_terminal");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("exhaustion.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      {
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         int rowsSeen = 0;
+         while (rs && rowsSeen < 3 && rs->next()) {
+            ++rowsSeen;
+         }
+         requireLongEquals(3, rowsSeen, when + ": three rows");
+         require(rs && !rs->next(), when + ": the end");
+
+         // asking again never restarts the query
+         for (int again = 0; again < 5; ++again) {
+            if (rs && rs->next()) {
+               ++rowsSeen;
+            }
+         }
+         requireLongEquals(3, rowsSeen, when + ": no more rows however often next() is called");
+         if (rs) {
+            requireCursorHasNoData(*rs, when + ": after exhaustion");
+            rs->close();
+            rs->close();
+         }
+      }
+      requireLongEquals(pass == 0 ? 1 : 0, openStatementCount(db),
+                        when + ": the exhausted cursor holds no statement");
+
+      {
+         // a new cursor is a new execution: it does see the rows
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+         int rows = 0;
+         while (rs && rows < 3 && rs->next()) {
+            ++rows;
+         }
+         requireLongEquals(3, rows, when + ": a new cursor sees every row");
+      }
+
+      {
+         // exhaustion followed by the database closing, with another cursor active
+         unique_ptr<SQLiteResultSet> done(openCursor(db, ITEMS_BY_ID));
+         unique_ptr<SQLiteResultSet> running(openCursor(db, ITEMS_BY_ID));
+         while (done && done->next()) {
+         }
+         require(running && running->next(), when + ": a cursor still running");
+         db.close();
+         require(db.sqliteHandle() == nullptr, when + ": the connection closed");
+         if (done) {
+            requireCursorHasNoData(*done, when + ": exhausted cursor after the database closed");
+         }
+         if (running) {
+            requireCursorHasNoData(*running, when + ": running cursor after the database closed");
+         }
+      }
+      require(db.open(), when + ": reopen");
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cache_disabled_with_several_active_cursors() {
+   TEST_CASE("test_cache_disabled_with_several_active_cursors");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache_many.sqlite3"));
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+
+   const char* const namesSql = "select name from items order by id";
+
+   {
+      // a: cached statement; b: same SQL, so a separate statement; c: other SQL
+      unique_ptr<SQLiteResultSet> a(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> b(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> c(openCursor(db, namesSql));
+      require(a && b && c, "three active cursors");
+      if (a && b && c) {
+         requireLongEquals(3, openStatementCount(db), "three statements are open");
+         require(a->next() && b->next() && b->next() && c->next(), "all under way");
+         requireLongEquals(1, a->intForColumnIndex(0), "a at row 1");
+         requireLongEquals(2, b->intForColumnIndex(0), "b at row 2");
+         requireStringEquals("apple", firstText(*c), "c at row 1");
+
+         db.setShouldCacheStatements(false);   // the cache held a and c's statements
+         requireLongEquals(3, openStatementCount(db), "no active statement was finalized");
+
+         require(c->next(), "c row 2");
+         requireStringEquals("banana", firstText(*c), "c at row 2");
+         require(b->next(), "b row 3");
+         requireLongEquals(3, b->intForColumnIndex(0), "b at row 3");
+         require(a->next(), "a row 2");
+         requireLongEquals(2, a->intForColumnIndex(0), "a at row 2");
+         require(!b->next(), "b ends");
+         requireLongEquals(2, openStatementCount(db), "b's statement is gone, the others live");
+         require(a->next(), "a row 3");
+         requireLongEquals(3, a->intForColumnIndex(0), "a at row 3");
+         require(c->next(), "c row 3");
+         requireStringEquals("cherry", firstText(*c), "c at row 3");
+         require(!a->next() && !c->next(), "a and c end");
+      }
+   }
+   requireLongEquals(0, openStatementCount(db),
+                     "every statement was finalized once its last user ended");
+
+   {
+      // several active cursors when the database closes
+      db.setShouldCacheStatements(true);
+      unique_ptr<SQLiteResultSet> a(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> b(openCursor(db, ITEMS_BY_ID));
+      unique_ptr<SQLiteResultSet> c(openCursor(db, namesSql));
+      require(a && b && c && a->next() && b->next() && c->next(), "three cursors under way");
+      db.setShouldCacheStatements(false);
+      db.close();
+      require(db.sqliteHandle() == nullptr, "the connection closed with cursors active");
+      if (a && b && c) {
+         requireCursorHasNoData(*a, "a after the database closed");
+         requireCursorHasNoData(*b, "b after the database closed");
+         requireCursorHasNoData(*c, "c after the database closed");
+      }
+   }
+   require(db.open(), "reopen");
+   requireLongEquals(0, openStatementCount(db), "a fresh connection has no statements");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_update_while_cursor_owns_same_sql() {
+   TEST_CASE("test_update_while_cursor_owns_same_sql");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("update_slot.sqlite3"));
+   require(db.open(), "open");
+   db.setShouldCacheStatements(false);
+   require(exec(db, "create table log(id integer primary key, msg text)"), "create table");
+   db.setShouldCacheStatements(true);
+
+   const char* const insertSql = "insert into log(msg) values ('x')";
+
+   // a query-style cursor over a statement is not stepped until next() is
+   // called, so it owns the cached statement for this SQL in the meantime
+   unique_ptr<SQLiteResultSet> pending(openCursor(db, insertSql));
+   require(pending != nullptr, "a cursor over an insert that has not run yet");
+   requireLongEquals(1, openStatementCount(db), "its statement is the cached one");
+
+   // an update of the same SQL runs on a statement of its own
+   unsigned long rowsAffected = 0;
+   require(db.executeUpdate(insertSql, rowsAffected), "executeUpdate of the same SQL");
+   requireLongEquals(1, rowsAffected, "one row inserted");
+   requireLongEquals(1, openStatementCount(db), "the update's statement is gone, the cached one remains");
+
+   // the cursor's own statement still runs, once
+   if (pending) {
+      require(!pending->next(), "the insert runs when the cursor is stepped");
+      require(!pending->next(), "and does not run again");
+   }
+   pending.reset();
+   requireLongEquals(1, openStatementCount(db), "one idle cached statement is left");
+
+   // with the cursor gone the cached statement is used again
+   require(db.executeUpdate(insertSql, rowsAffected), "executeUpdate once more");
+   requireLongEquals(1, openStatementCount(db), "still the one cached statement");
+
+   // one row per execution: the update, the cursor, the update again
+   requireLongEquals(3, scalar(db, "select count(*) from log"), "three rows stored");
    db.close();
 }

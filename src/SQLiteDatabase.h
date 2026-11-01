@@ -113,6 +113,39 @@ private:
    // (see SQLiteResultSet::invalidate) so that none outlives the connection
    // or the statements it uses. Raw pointers: the database owns neither the
    // result sets nor, through this set, anything else.
+   //
+   // Statement ownership (see also SQLiteResultSet):
+   //  - the cache owns a cached statement while no result set uses it;
+   //  - a result set has exclusive use of a statement while it is active
+   //    (the statement's cursorCount() is 1). A statement that is in use is
+   //    never reused or rebound: another execution of the same SQL gets a
+   //    separate statement that is not cached, and belongs to its result set;
+   //  - whoever drops the last reference to a statement the cache does not
+   //    own deletes (and so finalizes) it.
+   //
+   // The states of a statement and what moves it between them:
+   //   cached, idle       in the cache, cursorCount() 0.
+   //                      -> cached, active: a result set is created on it
+   //                      -> gone: the cache is cleared, or the database closes
+   //   cached, active     in the cache, cursorCount() 1; not reused meanwhile.
+   //                      -> cached, idle: its result set ends or is destroyed
+   //                         (the statement is reset and its bindings cleared)
+   //                      -> uncached, active: the cache is cleared (caching
+   //                         switched off); the result set becomes the owner
+   //                      -> gone: the database closes (the result set is
+   //                         invalidated first)
+   //   uncached, active   owned by its one result set (a separate statement
+   //                      for a second execution of the same SQL, or one
+   //                      prepared with caching off, or one the cache gave up).
+   //                      -> gone: its result set ends, is destroyed, or is
+   //                         invalidated by the database closing
+   // A result set is active until it ends (see SQLiteResultSet); an ended
+   // result set holds no statement.
+   //
+   // The cached statement for sql if there is one and no active result set
+   // uses it. slotTaken is set when there is one that is in use.
+   SQLiteStatement* idleCachedStatement(const std::string& sql, bool& slotTaken);
+
    void registerCursor(SQLiteResultSet* resultSet);
    void unregisterCursor(SQLiteResultSet* resultSet);
    void invalidateCursors();
@@ -143,6 +176,7 @@ public:
 
    void close();
    void reset();
+   void clearBindings();
 
    sqlite3_stmt* statement();
 

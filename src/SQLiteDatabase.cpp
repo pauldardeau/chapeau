@@ -108,6 +108,25 @@ void SQLiteDatabase::unregisterCursor(SQLiteResultSet* resultSet) {
 
 //******************************************************************************
 
+SQLiteStatement* SQLiteDatabase::idleCachedStatement(const std::string& sql,
+                                                     bool& slotTaken) {
+   slotTaken = false;
+
+   SQLiteStatement* statement =
+      dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+
+   if (statement != nullptr && statement->cursorCount() > 0) {
+      // an active result set owns this statement's execution state: running
+      // or rebinding it would disturb that result set
+      slotTaken = true;
+      return nullptr;
+   }
+
+   return statement;
+}
+
+//******************************************************************************
+
 void SQLiteDatabase::invalidateCursors() {
    // invalidate() must not touch m_cursors, so work on a private copy
    std::set<SQLiteResultSet*> live;
@@ -405,10 +424,17 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
    const bool cacheStatements = shouldCacheStatements();
 
+   // slotTaken: the cache already holds a statement for this SQL and an active
+   // result set owns its execution state, so this execution gets a separate,
+   // uncached statement (see idleCachedStatement)
+   bool slotTaken = false;
+
    if (cacheStatements) {
-      statement = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+      statement = idleCachedStatement(sql, slotTaken);
       pStmt = statement ? statement->statement() : nullptr;
    }
+
+   const bool cacheThis = cacheStatements && !slotTaken;
 
    int numberOfRetries = 0;
    bool retry = false;
@@ -452,14 +478,19 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
    if (0 != queryCount) {
       Logger::error("the bind count is not correct for the # of variables (executeQuery)");
-      ::sqlite3_finalize(pStmt);
+
+      // finalize only a statement prepared for this call. One that came from
+      // the cache is still the cache's, and stays valid for later executions.
+      if (!statement) {
+         ::sqlite3_finalize(pStmt);
+      }
       return nullptr;
    }
 
    if (!statement) {
-      statement = new SQLiteStatement(pStmt, cacheStatements);
+      statement = new SQLiteStatement(pStmt, cacheThis);
 
-      if (cacheStatements) {
+      if (cacheThis) {
          setCachedStatement(statement,sql);
       }
    }
@@ -498,10 +529,17 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    const bool cacheStatements = shouldCacheStatements();
 
+   // slotTaken: the cache already holds a statement for this SQL and an active
+   // result set owns its execution state, so this execution gets a separate,
+   // uncached statement (see idleCachedStatement)
+   bool slotTaken = false;
+
    if (cacheStatements) {
-      statement = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+      statement = idleCachedStatement(sql, slotTaken);
       pStmt = statement ? statement->statement() : nullptr;
    }
+
+   const bool cacheThis = cacheStatements && !slotTaken;
 
    int numberOfRetries = 0;
    bool retry = false;
@@ -547,7 +585,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    const bool isNewlyCreatedStatement = !statement;
 
    if (isNewlyCreatedStatement) {
-      statement = new SQLiteStatement(pStmt, cacheStatements);
+      statement = new SQLiteStatement(pStmt, cacheThis);
    }
 
    size_t idx = 0;
@@ -580,6 +618,10 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
       // must not be finalized/deleted here
       if (isNewlyCreatedStatement) {
          delete statement;
+      } else {
+         // drop the values bound for the failed call; the statement itself
+         // stays valid and idle in the cache
+         statement->clearBindings();
       }
 
       return nullptr;
@@ -588,7 +630,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    // deferred until after the bind-count check succeeds, so a mismatched
    // call never leaves a cache entry pointing at an already-finalized
    // statement
-   if (isNewlyCreatedStatement && cacheStatements) {
+   if (isNewlyCreatedStatement && cacheThis) {
       setCachedStatement(statement, sql);
    }
 
@@ -628,10 +670,16 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    bool cacheStatements = shouldCacheStatements();
 
+   // slotTaken: see executeQuery -- a statement an active result set owns is
+   // never reused, a separate uncached one is used instead
+   bool slotTaken = false;
+
    if (cacheStatements) {
-      cachedStmt = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+      cachedStmt = idleCachedStatement(sql, slotTaken);
       pStmt = cachedStmt ? cachedStmt->statement() : nullptr;
    }
+
+   const bool cacheThis = cacheStatements && !slotTaken;
 
    int numberOfRetries = 0;
    bool retry = false;
@@ -678,7 +726,12 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    if (0 != queryCount) {
       ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
                sql.c_str());
-      ::sqlite3_finalize(pStmt);
+
+      // finalize only a statement prepared for this call. One that came from
+      // the cache is still the cache's, and stays valid for later executions.
+      if (!cachedStmt) {
+         ::sqlite3_finalize(pStmt);
+      }
       rowsAffectedCount = 0L;
       return false;
    }
@@ -727,7 +780,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    assert(rc != SQLITE_ROW);
 
-   if (cacheStatements && !cachedStmt) {
+   if (cacheThis && !cachedStmt) {
       cachedStmt = new SQLiteStatement(pStmt, true);
       setCachedStatement(cachedStmt, sql);
    }
@@ -784,10 +837,16 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
                m_databasePath.c_str());
    }
 
+   // slotTaken: see executeQuery -- a statement an active result set owns is
+   // never reused, a separate uncached one is used instead
+   bool slotTaken = false;
+
    if (cacheStatements) {
-      cachedStmt = dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+      cachedStmt = idleCachedStatement(sql, slotTaken);
       pStmt = cachedStmt ? cachedStmt->statement() : nullptr;
    }
+
+   const bool cacheThis = cacheStatements && !slotTaken;
 
    int numberOfRetries = 0;
    bool retry = false;
@@ -834,7 +893,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const bool isNewlyCreatedStatement = !cachedStmt;
 
    if (isNewlyCreatedStatement) {
-      cachedStmt = new SQLiteStatement(pStmt, cacheStatements);
+      cachedStmt = new SQLiteStatement(pStmt, cacheThis);
    }
 
    size_t idx = 0;
@@ -869,6 +928,10 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       if (isNewlyCreatedStatement) {
          delete cachedStmt;
          cachedStmt = nullptr;
+      } else {
+         // drop the values bound for the failed call; the statement itself
+         // stays valid and idle in the cache
+         cachedStmt->clearBindings();
       }
 
       affectedRowsCount = 0L;
@@ -878,7 +941,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    // deferred until after the bind-count check succeeds, so a mismatched
    // call never leaves a cache entry pointing at an already-finalized
    // statement
-   if (isNewlyCreatedStatement && cacheStatements) {
+   if (isNewlyCreatedStatement && cacheThis) {
       setCachedStatement(cachedStmt, sql);
    }
 
@@ -928,7 +991,9 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    if (cachedStmt) {
       ::sqlite3_reset(pStmt);
-      if (cacheStatements) {
+      if (cacheThis) {
+         // nothing keeps a copy of this call's arguments alive in the cache
+         cachedStmt->clearBindings();
          cachedStmt->incrementUseCount();
       } else {
          delete cachedStmt;
@@ -1114,6 +1179,14 @@ void SQLiteStatement::close() {
 void SQLiteStatement::reset() {
    if (m_statement) {
       ::sqlite3_reset(m_statement);
+   }
+}
+
+//******************************************************************************
+
+void SQLiteStatement::clearBindings() {
+   if (m_statement) {
+      ::sqlite3_clear_bindings(m_statement);
    }
 }
 

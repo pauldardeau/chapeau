@@ -20,9 +20,12 @@ class SQLiteResultSet;
  * a result set may outlive its database, and the arguments of a query may be
  * destroyed before the result set is stepped.
  *
- * Deliberately NOT covered here: a statement shared by two cursors, next()
- * after the end, schema changes after a statement was cached, and busy-wait
- * behaviour. Those are known defects; see tests/regression/.
+ * Also covers statement execution (CH-03, CH-04, CH-05): result sets over
+ * identical SQL are independent, wrong argument counts are refused without
+ * harm to the cached statement, and an exhausted result set stays exhausted.
+ *
+ * Deliberately NOT covered here: schema changes after a statement was cached
+ * and busy-wait behaviour. Those are known defects; see tests/regression/.
  */
 class TestSQLiteFoundation : public poivre::TestSuite {
 protected:
@@ -44,6 +47,15 @@ protected:
    void test_cursor_invalid_after_reopen();
    void test_temporary_text_arguments();
    void test_temporary_blob_arguments();
+   void test_two_cursors_identical_sql();
+   void test_two_cursors_parameterized_sql();
+   void test_close_one_cursor_while_another_is_active();
+   void test_statement_reuse_after_cursor_destroyed();
+   void test_incorrect_argument_counts();
+   void test_arguments_then_none_then_arguments();
+   void test_cursor_exhaustion_is_terminal();
+   void test_cache_disabled_with_several_active_cursors();
+   void test_update_while_cursor_owns_same_sql();
 
    void requireLongEquals(long long expected,
                           long long actual,

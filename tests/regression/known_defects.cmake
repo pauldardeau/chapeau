@@ -21,10 +21,6 @@
 # today (no assertion); once the API exists, add a real check and a table line.
 
 set(CHAPEAU_DEFECT_TABLE
-   "CH-03|ch03_noarg_overload_invalidates_cached_statement|60|no-argument overload finalizes a statement the cache still holds"
-   "CH-04|ch04_two_cursors_same_sql_independent|60|two live cursors over the same SQL share one statement"
-   "CH-05|ch05_next_after_end_cached|60|next() after the end restarts the query (cached)"
-   "CH-05|ch05_next_after_end_uncached|60|next() after the end dereferences a null statement (uncached)"
    "CH-06|ch06_schema_change_cached_update|60|cached update statement fails permanently after a schema change"
    "CH-06|ch06_schema_change_cached_query|60|cached query statement fails permanently after a schema change"
    "CH-07|ch07_busy_prepare_hang|10|executeQuery() retries forever on a busy database (busy limit 0)"
@@ -39,6 +35,10 @@ set(CHAPEAU_FIXED_TABLE
    "CH-01|ch01_cursor_after_database_destroyed|60|result set destroyed after its database object"
    "CH-01|ch01_cursor_after_cache_disabled|60|result set used after the statement cache was switched off"
    "CH-02|ch02_bound_args_destroyed_before_step|60|bound arguments destroyed before the result set is stepped"
+   "CH-03|ch03_noarg_overload_invalidates_cached_statement|60|no-argument overload finalizes a statement the cache still holds"
+   "CH-04|ch04_two_cursors_same_sql_independent|60|two live cursors over the same SQL share one statement"
+   "CH-05|ch05_next_after_end_cached|60|next() after the end restarts the query (cached)"
+   "CH-05|ch05_next_after_end_uncached|60|next() after the end dereferences a null statement (uncached)"
    # fixed as a consequence of the CH-01 ownership change (close() and the
    # destructor now invalidate live result sets and finalize their statements);
    # the busy-wait loops themselves (CH-07 proper) are unchanged
