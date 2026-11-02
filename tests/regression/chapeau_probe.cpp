@@ -1227,6 +1227,120 @@ std::map<std::string, Scenario> scenarios() {
       checkLong("and the row is there, once", 1, scalar(a, "select count(*) from t where id = 9"));
    };
 
+   // ===================== CH-27: one statement per call =====================
+   // executeQuery() and executeUpdate() ran the first statement of SQL that held
+   // several, reported success, and ignored the rest; a NUL byte cut the SQL
+   // short the same way. Now the whole call is refused before anything runs.
+
+   s["ch27_multi_statement_sql_refused_before_anything_runs"] = [] {
+      defect("CH-27", "the first statement of multi-statement SQL ran and the call reported success");
+      for (int pass = 0; pass < 2; ++pass) {
+         const bool cached = (pass == 0);
+         const std::string when = cached ? "cached: " : "uncached: ";
+         SQLiteDatabase db(g_path);
+         db.setLogsErrors(false);
+         openDb(db, cached);
+         unsigned long cleared = 0;
+         check((when + "the table starts empty").c_str(), db.executeUpdate("delete from t", cleared));
+         insert3(db);
+         SQLiteDatabase other(g_path);   // an independent connection: what is really stored
+         check((when + "an independent connection opens").c_str(), other.open());
+         other.setShouldCacheStatements(false);
+
+         const std::string nul(1, '\0');
+         const std::vector<std::string> refused = {
+            "create table a(x); create table b(y);",
+            "insert into t(id,v) values (10,'x'); insert into t(id,v) values (11,'y')",
+            "insert into t(id,v) values (12,'x'); delete from t",
+            "insert into t(id,v) values (13,'x'); this is not sql",
+            "create table c(x); insert into c(x) values (1)",
+            "select 1; select 2",
+            "insert into t(id,v) values (14,'x')" + nul + "; delete from t",
+            nul + "insert into t(id,v) values (15,'x')",
+            "insert into t(id,v) values (16,'x');" + nul,
+         };
+
+         for (const std::string& sql : refused) {
+            unsigned long rows = 77;
+            DBStatementArgs none;
+            check((when + "executeUpdate(sql) is false").c_str(), !db.executeUpdate(sql, rows));
+            checkLong((when + "with no rows affected").c_str(), 0, static_cast<long long>(rows));
+            rows = 77;
+            check((when + "executeUpdate(sql, args) is false").c_str(), !db.executeUpdate(sql, none, rows));
+            checkLong((when + "with no rows affected, again").c_str(), 0, static_cast<long long>(rows));
+            check((when + "executeQuery(sql) is nullptr").c_str(), std::unique_ptr<DBResultSet>(db.executeQuery(sql)) == nullptr);
+            check((when + "executeQuery(sql, args) is nullptr").c_str(), std::unique_ptr<DBResultSet>(db.executeQuery(sql, none)) == nullptr);
+            check((when + "recorded as a refused statement").c_str(),
+                  db.lastErrorKind() == DBErrorKind::RefusedStatement && db.lastErrorCode() == 0 &&
+                  !db.lastErrorMessage().empty());
+         }
+
+         checkLong((when + "nothing was inserted or deleted").c_str(), 3, scalar(other, "select count(*) from t"));
+         checkLong((when + "nothing was created").c_str(), 0,
+                   scalar(other, "select count(*) from sqlite_master where name in ('a','b','c')"));
+         check((when + "no transaction was left open").c_str(), !db.inTransaction());
+
+         // the same connection is fine afterwards, and a tail that is only whitespace, semicolons or comments is
+         unsigned long rows = 0;
+         check((when + "a valid statement works right after").c_str(),
+               db.executeUpdate("insert into t(id,v) values (20,'ok'); -- done\n  ;", rows));
+         checkLong((when + "once").c_str(), 1, static_cast<long long>(rows));
+         checkLong((when + "and is stored").c_str(), 4, scalar(other, "select count(*) from t"));
+         check((when + "with no error left").c_str(), db.lastErrorKind() == DBErrorKind::None);
+         checkLong((when + "a query with a tail").c_str(), 1, scalar(db, "select 1 /* c */;;"));
+      }
+   };
+
+   // Every refusal writes one line when setLogsErrors(true) and nothing when it is
+   // off; the line holds the kind and the explanation, and is whole even when the
+   // SQL holds a NUL byte (which is written as \0 so that the line is not cut).
+   s["ch27_refusal_is_logged_once_and_silent_when_off"] = [] {
+      defect("CH-27", "a refused statement boundary is reported exactly once, and only when asked");
+      const std::string nul(1, '\0');
+      const std::vector<std::pair<std::string, std::string>> inputs = {
+         {"multiple statements", "create table a(x); create table b(y)"},
+         {"a NUL byte", "select 1" + nul + "; select 2"},
+      };
+
+      for (const bool logs : {true, false}) {
+         for (const auto& input : inputs) {
+            for (const int entry : {0, 1, 2, 3}) {
+               const std::string label = std::string(logs ? "logging on, " : "logging off, ") + input.first + ", entry " +
+                                         std::to_string(entry) + ": ";
+               SQLiteDatabase db(g_path);
+               db.setLogsErrors(logs);
+               openDb(db);
+               bool refused = false;
+               const std::string output = captureStdout([&] {
+                  unsigned long rows = 77;
+                  DBStatementArgs none;
+                  switch (entry) {
+                     case 0: refused = (std::unique_ptr<DBResultSet>(db.executeQuery(input.second)) == nullptr); break;
+                     case 1: refused = (std::unique_ptr<DBResultSet>(db.executeQuery(input.second, none)) == nullptr); break;
+                     case 2: refused = !db.executeUpdate(input.second, rows); break;
+                     default: refused = !db.executeUpdate(input.second, none, rows); break;
+                  }
+               });
+               check((label + "refused").c_str(), refused);
+               check((label + "recorded").c_str(), db.lastErrorKind() == DBErrorKind::RefusedStatement);
+               if (!logs) {
+                  check((label + "nothing is written").c_str(), output.empty());
+                  continue;
+               }
+               check((label + "exactly one line").c_str(), countOf(output, '\n') == 1 && !output.empty() && output.back() == '\n');
+               check((label + "naming the kind").c_str(), output.find("DB Error [RefusedStatement]: ") == 0);
+               check((label + "and the operation").c_str(),
+                     output.find(entry < 2 ? " in executeQuery: " : " in executeUpdate: ") != std::string::npos);
+               check((label + "and the database, so the line is whole").c_str(),
+                     output.find("(database: ") != std::string::npos);
+               if (input.first == "a NUL byte") {
+                  check((label + "with the NUL byte written out").c_str(), output.find("select 1\\0; select 2") != std::string::npos);
+               }
+            }
+         }
+      }
+   };
+
    return s;
 }
 

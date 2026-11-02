@@ -151,6 +151,10 @@ void TestSQLiteFoundation::runTests() {
    test_query_with_result_columns_stays_lazy();
    test_query_without_result_columns_that_fails();
    test_query_without_result_columns_reentrancy();
+   test_statement_boundary_refusals();
+   test_statement_boundary_accepts();
+   test_statement_boundary_and_the_statement_cache();
+   test_statement_boundary_with_transactions_and_cursors();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -4822,5 +4826,530 @@ void TestSQLiteFoundation::test_query_without_result_columns_reentrancy() {
    require(failed && failed->status() == DBResultSetStatus::Error, "the insert collides");
    require(g_reentry.calledNested && g_reentry.nestedKind == DBErrorKind::InUse, "the nested call was refused again");
    requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed", "its own error stays");
+   db.close();
+}
+
+// ===================== H1a-11: one statement per call =====================
+// executeQuery() and executeUpdate() take at most one statement. Whitespace,
+// semicolons and comments may follow it; a second statement, trailing text
+// that is not SQL, or a NUL byte anywhere refuses the whole call before
+// anything is run. What an independent connection sees is the proof that
+// nothing was.
+
+namespace {
+
+enum class Entry { Query, QueryArgs, Update, UpdateArgs };
+
+const Entry ALL_ENTRIES[] = {Entry::Query, Entry::QueryArgs, Entry::Update, Entry::UpdateArgs};
+
+const Entry ARGUMENT_ENTRIES[] = {Entry::QueryArgs, Entry::UpdateArgs};
+
+string entryName(Entry entry) {
+   switch (entry) {
+      case Entry::Query: return "executeQuery(sql)";
+      case Entry::QueryArgs: return "executeQuery(sql, args)";
+      case Entry::Update: return "executeUpdate(sql)";
+      default: return "executeUpdate(sql, args)";
+   }
+}
+
+bool returnsCursor(Entry entry) {
+   return Entry::Query == entry || Entry::QueryArgs == entry;
+}
+
+// what one call gave back
+struct CallResult {
+   bool accepted = false;             // a result set came back / executeUpdate() returned true
+   DBResultSetStatus status = DBResultSetStatus::Ready;
+   bool hasRow = false;               // the first next() of the result set
+   long long value = -1;              // and its first column
+   unsigned long rowsAffected = 77;   // set by executeUpdate(), 0 when it fails
+};
+
+// With oneParameter the argument overloads are given one argument (a long, 1).
+CallResult callEntry(SQLiteDatabase& db, Entry entry, const string& sql, bool oneParameter) {
+   CallResult result;
+   DBStatementArgs args;
+   if (oneParameter) {
+      args.add(new DBLong(1));
+   }
+
+   if (returnsCursor(entry)) {
+      unique_ptr<DBResultSet> rs(Entry::Query == entry ? db.executeQuery(sql)
+                                                       : db.executeQuery(sql, args));
+      if (rs) {
+         result.accepted = true;
+         result.status = rs->status();
+         if (rs->next()) {
+            result.hasRow = true;
+            result.value = rs->longForColumnIndex(0);
+         }
+      }
+   } else {
+      result.accepted = (Entry::Update == entry) ? db.executeUpdate(sql, result.rowsAffected)
+                                                 : db.executeUpdate(sql, args, result.rowsAffected);
+   }
+   return result;
+}
+
+// t(v), log(m) and nothing else; the three tables the cases write to, or create
+bool resetBoundaryFixture(SQLiteDatabase& db) {
+   const bool wasCaching = db.shouldCacheStatements();
+   db.setShouldCacheStatements(false);
+   const bool ok = exec(db, "drop trigger if exists trg") && exec(db, "drop table if exists a") &&
+                   exec(db, "drop table if exists b") && exec(db, "drop table if exists t") &&
+                   exec(db, "drop table if exists log") && exec(db, "create table t(v text)") &&
+                   exec(db, "create table log(m text)");
+   db.setShouldCacheStatements(wasCaching);
+   db.clearCachedStatements();
+   return ok;
+}
+
+// everything the cases can change, as an independent connection sees it:
+// "<objects>|<t>|<log>"
+string boundaryWorld(const string& path) {
+   return rawFirstRow(path,
+      "select ifnull((select group_concat(type || ':' || name, ',') from "
+      "(select type, name from sqlite_master order by type, name)), '') || '|' || "
+      "ifnull((select group_concat(v, ',') from (select v from t order by rowid)), '') || '|' || "
+      "ifnull((select group_concat(m, ',') from (select m from log order by rowid)), '')");
+}
+
+const char* const FIXTURE_WORLD = "table:log,table:t||";
+
+// the open statements themselves, not their text: a statement that was
+// finalized, or prepared and not finalized, shows up in this
+vector<sqlite3_stmt*> openStatementHandles(SQLiteDatabase& db) {
+   vector<sqlite3_stmt*> handles;
+   if (db.sqliteHandle() == nullptr) {
+      return handles;
+   }
+   for (sqlite3_stmt* s = sqlite3_next_stmt(db.sqliteHandle(), nullptr);
+        s != nullptr;
+        s = sqlite3_next_stmt(db.sqliteHandle(), s)) {
+      handles.push_back(s);
+   }
+   sort(handles.begin(), handles.end());
+   return handles;
+}
+
+// SQL that must be refused as a whole, and what the message says about it
+struct Refusal {
+   string label;
+   string sql;
+   bool oneParameter;
+   vector<string> messageParts;
+};
+
+const char* const ONLY_ONE = "only one statement is allowed per call; nothing was run";
+
+}
+
+void TestSQLiteFoundation::test_statement_boundary_refusals() {
+   TEST_CASE("test_statement_boundary_refusals");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("boundary_refused.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "pragma synchronous = off"), "no fsync: the cases make many small changes");
+
+   const string NUL(1, '\0');
+   vector<Refusal> cases;
+
+   // a second statement, or text after the first that is not SQL. 'rest' is where
+   // the message must say that the trailing SQL starts: its first byte that is not blank.
+   auto trailing = [&](const string& label, const string& sql, const string& rest,
+                       bool oneParameter, const string& also = "") {
+      const size_t offset = sql.find(rest, 1);
+      require(offset != string::npos, label + ": the case holds '" + rest + "'");
+      vector<string> parts = {ONLY_ONE, "the trailing SQL starts at offset " + to_string(offset)};
+      if (!also.empty()) {
+         parts.push_back(also);
+      }
+      cases.push_back({label, sql, oneParameter, parts});
+   };
+   // a NUL byte: the message says where the first one is
+   auto withNul = [&](const string& label, const string& sql) {
+      cases.push_back({label, sql, false,
+                       {"the SQL contains a NUL byte at offset " + to_string(sql.find('\0')),
+                        "nothing was run"}});
+   };
+
+   trailing("two CREATE TABLE", "create table a(x); create table b(y)", "create table b", false);
+   trailing("two CREATE TABLE, semicolons and newlines", "create table a(x);\ncreate table b(y);\n", "create table b", false);
+   trailing("two INSERT", "insert into t(v) values ('1'); insert into t(v) values ('2')", "insert into t(v) values ('2')", false);
+   trailing("two INSERT, a parameter in the first", "insert into t(v) values (?); insert into t(v) values ('2')",
+            "insert into t(v) values ('2')", true);
+   trailing("two INSERT, a parameter in each", "insert into t(v) values (?); insert into t(v) values (?)",
+            "insert into t(v) values (?)", true);
+   trailing("two SELECT", "select 1; select 2", "select 2", false);
+   trailing("two SELECT, a parameter in the first", "select ?; select 2", "select 2", true);
+   trailing("three INSERT", "insert into t(v) values ('1'); insert into t(v) values ('2'); insert into t(v) values ('3')",
+            "insert into t(v) values ('2')", false);
+   trailing("INSERT then DELETE", "insert into t(v) values ('keep'); delete from t", "delete from t", false);
+   trailing("a statement and a comment and a statement", "select 1; -- note\n select 2", "-- note", false);
+   trailing("a statement with a literal that holds a semicolon, then another", "insert into t(v) values ('a;b'); delete from t",
+            "delete from t", false);
+   trailing("a trigger, then another statement",
+            "create trigger trg after insert on t begin insert into log(m) values ('x'); end; delete from t", "delete from t", false);
+   trailing("a leading semicolon, two statements", "; select 1; select 2", "select 2", false);
+   // the trailing SQL starts at its first byte that is not blank, which may be a semicolon or a comment
+   trailing("a second semicolon, then a statement", "select 1;; select 2", "; select 2", false);
+   trailing("empty statements between two statements", "select 1; ; ;\n; select 2", "; ;\n; select 2", false);
+   trailing("comments and semicolons between two statements", "insert into t(v) values ('1'); /* x */ ; -- y\n ; delete from t",
+            "/* x */ ; -- y\n ; delete from t", false);
+   trailing("a semicolon directly before the second statement", "delete from t;;delete from log", ";delete from log", false);
+   trailing("a transaction in one call", "begin; insert into t(v) values ('1'); commit", "insert into t(v) values ('1')", false);
+   trailing("BEGIN and a statement", "begin; select 1", "select 1", false);
+   trailing("a statement, then something that is not SQL", "insert into t(v) values ('1'); this is not sql", "this is not sql", false,
+            "the trailing SQL does not prepare");
+   trailing("a statement, then half a statement", "insert into t(v) values ('1'); insert into", "insert into", false,
+            "the trailing SQL does not prepare");
+   trailing("a statement, then a statement that needs the first (a table)", "create table a(x); insert into a(x) values (1)",
+            "insert into a(x) values (1)", false, "no such table: a");
+   trailing("a statement, then a statement that needs the first (an index)", "create table a(x); create index ia on a(x)",
+            "create index ia on a(x)", false, "no such table");
+   trailing("a statement and an unterminated string", "select 1; select 'abc", "select 'abc", false);
+
+   withNul("a NUL byte at the start", NUL + "select 1");
+   withNul("a NUL byte in the middle", "select 1" + NUL + "; select 2");
+   withNul("a NUL byte at the end", "select 1;" + NUL);
+   withNul("a NUL byte after the statement", "insert into t(v) values ('1')" + NUL);
+   withNul("only a NUL byte", NUL);
+   withNul("a NUL byte in a string literal", "insert into t(v) values ('a" + NUL + "b')");
+   withNul("a NUL byte in a trailing comment", "select 1; -- note" + NUL + "x");
+   withNul("two NUL bytes", "select 1" + NUL + NUL);
+   withNul("a NUL byte in a second statement", "select 1; select 2" + NUL);
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      require(resetBoundaryFixture(db), when + ": fixture");
+      require(boundaryWorld(path) == FIXTURE_WORLD, when + ": the fixture is what the cases assume");
+      // a valid statement that is run after each refusal; run once first so that
+      // the cache (when there is one) holds it before the open statements are noted
+      require(exec(db, "update log set m = m where 0"), when + ": a valid statement");
+      const vector<sqlite3_stmt*> openBefore = openStatementHandles(db);
+
+      for (const Refusal& c : cases) {
+         for (Entry entry : ALL_ENTRIES) {
+            for (int repeat = 0; repeat < 2; ++repeat) {
+               const string label = when + ": " + entryName(entry) + ": " + c.label +
+                                    (repeat == 0 ? "" : " (again)");
+               const CallResult r = callEntry(db, entry, c.sql, c.oneParameter);
+
+               require(!r.accepted, label + ": refused");
+               if (!returnsCursor(entry)) {
+                  requireLongEquals(0, static_cast<long long>(r.rowsAffected), label + ": rowsAffected is 0");
+               }
+               requireLastError(db, DBErrorKind::RefusedStatement, 0, c.messageParts[0], label);
+               for (const string& part : c.messageParts) {
+                  require(db.lastErrorMessage().find(part) != string::npos,
+                          label + ": the message says '" + part + "' (got '" + db.lastErrorMessage() + "')");
+               }
+
+               requireStringEquals(FIXTURE_WORLD, boundaryWorld(path),
+                                   label + ": nothing was run, seen from an independent connection");
+               require(openStatementHandles(db) == openBefore,
+                       label + ": no statement was left behind, cached, or finalized: " + describe(openStatementSql(db)));
+               require(!db.inTransaction(), label + ": no transaction was left open");
+
+               require(exec(db, "update log set m = m where 0"), label + ": a valid statement works right after");
+               requireLastError(db, DBErrorKind::None, 0, "", label + ": and the refusal is gone");
+            }
+         }
+      }
+   }
+
+   db.close();
+}
+
+namespace {
+
+// SQL that must run, with what is true afterwards
+struct Acceptance {
+   string label;
+   string sql;
+   bool oneParameter;
+   bool returnsRows;           // a SELECT: executeUpdate() refuses it as a statement that returns rows
+   string worldAfter;          // boundaryWorld() afterwards
+   long long rowsAffected;     // of executeUpdate(), or -1: not checked
+   string worldAfterInsert;    // if not empty: after "insert into t(v) values ('z')" too (the trigger fires)
+};
+
+}
+
+void TestSQLiteFoundation::test_statement_boundary_accepts() {
+   TEST_CASE("test_statement_boundary_accepts");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("boundary_accepted.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "pragma synchronous = off"), "no fsync: the cases make many small changes");
+
+   const string FIXTURE = FIXTURE_WORLD;
+   vector<Acceptance> cases;
+
+   // one SELECT, with what may follow it
+   const vector<string> harmlessTails = {
+      ";", ";;;", " ;  ; ;", "   \t\n", " -- note", "; -- note\n", " /* c */", "; /* a */ ; -- b",
+      " /* unterminated", " -- no newline at end", "\n;\n", " /* one */ /* two */ ;; -- three"
+   };
+   for (const string& tail : harmlessTails) {
+      cases.push_back({"SELECT then [" + tail + "]", "select 1" + tail, false, true, FIXTURE, -1, ""});
+      cases.push_back({"SELECT with a parameter then [" + tail + "]", "select ?" + tail, true, true, FIXTURE, -1, ""});
+   }
+   // blank or empty before the statement
+   for (const string lead : {"  \n ", "/* lead */ ", "-- lead\n", "; ", ";;  ; "}) {
+      cases.push_back({"[" + lead + "] then SELECT", lead + "select 1", false, true, FIXTURE, -1, ""});
+   }
+   // semicolons and statement text that are not statement boundaries
+   cases.push_back({"a semicolon in a string literal", "select length('a;b;c') - 4", false, true, FIXTURE, -1, ""});
+   cases.push_back({"a semicolon in a quoted name", "select 1 as \"a;b\"", false, true, FIXTURE, -1, ""});
+   cases.push_back({"a statement in a block comment", "select 1 /* ; select 2 ; */", false, true, FIXTURE, -1, ""});
+   cases.push_back({"a statement in a line comment", "select 1 -- ; select 2", false, true, FIXTURE, -1, ""});
+   cases.push_back({"an escaped quote and a semicolon", "select length('it''s;') - 4", false, true, FIXTURE, -1, ""});
+
+   // statements that return no rows
+   const string ONE_ROW = "table:log,table:t|x|";
+   for (const string& tail : harmlessTails) {
+      cases.push_back({"INSERT then [" + tail + "]", "insert into t(v) values ('x')" + tail, false, false, ONE_ROW, 1, ""});
+      cases.push_back({"INSERT with a parameter then [" + tail + "]", "insert into t(v) values (?)" + tail, true, false,
+                       "table:log,table:t|1|", 1, ""});
+      cases.push_back({"CREATE TABLE then [" + tail + "]", "create table a(x)" + tail, false, false,
+                       "table:a,table:log,table:t||", -1, ""});
+   }
+   cases.push_back({"a semicolon in the value inserted", "insert into t(v) values ('a;b')", false, false,
+                    "table:log,table:t|a;b|", 1, ""});
+   cases.push_back({"a semicolon in the value inserted, and a tail", "insert into t(v) values ('a;b');  ;", false, false,
+                    "table:log,table:t|a;b|", 1, ""});
+   cases.push_back({"two statements' worth of text in a string", "insert into t(v) values ('x; delete from t');", false, false,
+                    "table:log,table:t|x; delete from t|", 1, ""});
+   const string TRIGGER = "create trigger trg after insert on t begin "
+                          "insert into log(m) values ('fired'); update log set m = m where 0; end";
+   cases.push_back({"a trigger with two statements in its body", TRIGGER, false, false,
+                    "table:log,table:t,trigger:trg||", -1, "table:log,table:t,trigger:trg|z|fired"});
+   cases.push_back({"a trigger, then a semicolon", TRIGGER + ";", false, false,
+                    "table:log,table:t,trigger:trg||", -1, "table:log,table:t,trigger:trg|z|fired"});
+   cases.push_back({"a trigger, then a comment", TRIGGER + "; -- done", false, false,
+                    "table:log,table:t,trigger:trg||", -1, "table:log,table:t,trigger:trg|z|fired"});
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      for (const Acceptance& c : cases) {
+         for (Entry entry : (c.oneParameter ? vector<Entry>(begin(ARGUMENT_ENTRIES), end(ARGUMENT_ENTRIES))
+                                            : vector<Entry>(begin(ALL_ENTRIES), end(ALL_ENTRIES)))) {
+            const string label = when + ": " + entryName(entry) + ": " + c.label;
+            require(resetBoundaryFixture(db), label + ": fixture");
+            const vector<sqlite3_stmt*> openBefore = openStatementHandles(db);
+
+            const CallResult r = callEntry(db, entry, c.sql, c.oneParameter);
+
+            if (c.returnsRows && !returnsCursor(entry)) {
+               // a SELECT is refused by executeUpdate() for what it is, not for its tail
+               require(!r.accepted, label + ": executeUpdate() refuses a statement that returns rows");
+               requireLastError(db, DBErrorKind::RefusedStatement, 0, "returns rows", label);
+               require(db.lastErrorMessage().find("only one statement") == string::npos,
+                       label + ": and not as a second statement (got '" + db.lastErrorMessage() + "')");
+               requireLongEquals(0, static_cast<long long>(r.rowsAffected), label + ": rowsAffected is 0");
+            } else if (returnsCursor(entry)) {
+               require(r.accepted, label + ": a result set (" + db.lastErrorMessage() + ")");
+               requireLastError(db, DBErrorKind::None, 0, "", label);
+               if (c.returnsRows) {
+                  require(r.hasRow && r.value == 1, label + ": one row, holding 1");
+               } else {
+                  require(r.status == DBResultSetStatus::Done && !r.hasRow, label + ": finished at once, no rows");
+               }
+            } else {
+               require(r.accepted, label + ": accepted (" + db.lastErrorMessage() + ")");
+               requireLastError(db, DBErrorKind::None, 0, "", label);
+               if (c.rowsAffected >= 0) {
+                  requireLongEquals(c.rowsAffected, static_cast<long long>(r.rowsAffected), label + ": rowsAffected");
+               }
+            }
+
+            const bool expectedToRun = !(c.returnsRows && !returnsCursor(entry));
+            requireStringEquals(expectedToRun ? c.worldAfter : FIXTURE_WORLD, boundaryWorld(path),
+                                label + ": what an independent connection sees");
+
+            if (expectedToRun && !c.worldAfterInsert.empty()) {
+               require(exec(db, "insert into t(v) values ('z')"), label + ": an insert");
+               requireStringEquals(c.worldAfterInsert, boundaryWorld(path), label + ": and the trigger fires");
+            }
+
+            if (pass != 0) {
+               require(openStatementHandles(db) == openBefore,
+                       label + ": nothing is left open when the cache is off: " + describe(openStatementSql(db)));
+            }
+         }
+      }
+   }
+
+   // no statement at all: empty, blank, only comments, only semicolons
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      require(resetBoundaryFixture(db), when + ": fixture");
+
+      for (const string& sql : vector<string>{"", "   ", "\n\t", "-- nothing here", "/* nothing here */", ";", ";;", "; ;  ;",
+                                               " ; -- x\n ;", "/* a */ ; /* b */ -- c"}) {
+         for (Entry entry : ALL_ENTRIES) {
+            const string label = when + ": " + entryName(entry) + ": [" + sql + "]";
+            const vector<sqlite3_stmt*> openBefore = openStatementHandles(db);
+            const CallResult r = callEntry(db, entry, sql, false);
+
+            if (returnsCursor(entry)) {
+               // the contract that was there before: a result set with nothing in it
+               require(r.accepted && r.status == DBResultSetStatus::Done && !r.hasRow, label + ": a finished result set");
+               requireLastError(db, DBErrorKind::None, 0, "", label);
+            } else {
+               // executeUpdate() has never had a contract for this; it is not a refused statement
+               require(db.lastErrorKind() != DBErrorKind::RefusedStatement, label + ": it is not refused");
+            }
+            requireStringEquals(FIXTURE_WORLD, boundaryWorld(path), label + ": nothing changed");
+            require(openStatementHandles(db) == openBefore, label + ": no statement was opened");
+         }
+      }
+   }
+
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_boundary_and_the_statement_cache() {
+   TEST_CASE("test_statement_boundary_and_the_statement_cache");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("boundary_cache.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "pragma synchronous = off"), "no fsync: the cases make many small changes");
+   db.setShouldCacheStatements(true);
+   require(resetBoundaryFixture(db), "fixture");
+   const string NUL(1, '\0');
+
+   const vector<string> refused = {
+      "select 1; select 2",
+      "select 1;" + NUL,
+      "insert into log(m) values ('c'); delete from log",
+      "select 1; this is not sql",
+      "select 1" + NUL + "; select 2",
+   };
+
+   // two statements are cached ...
+   requireLongEquals(1, scalar(db, "select 1"), "a query");
+   require(exec(db, "insert into log(m) values ('c')"), "an update");
+   const vector<sqlite3_stmt*> cached = openStatementHandles(db);
+   requireLongEquals(2, static_cast<long long>(cached.size()), "two statements are cached");
+
+   // ... refusals, the first statement of which is the SQL of a cached one, add and remove nothing ...
+   for (const string& sql : refused) {
+      for (Entry entry : ALL_ENTRIES) {
+         const CallResult r = callEntry(db, entry, sql, false);
+         require(!r.accepted, entryName(entry) + ": refused: " + sql);
+         require(openStatementHandles(db) == cached, entryName(entry) + ": the cache is as it was: " + sql);
+      }
+   }
+
+   // ... and the cached statements are still valid, and are the very ones that run
+   requireLongEquals(1, scalar(db, "select 1"), "the cached query still runs");
+   require(exec(db, "insert into log(m) values ('c')"), "the cached update still runs");
+   require(openStatementHandles(db) == cached, "by the same two statements");
+   requireStringEquals("table:log,table:t||c,c", boundaryWorld(path), "the update ran each time it was asked to, and only then");
+
+   // the cache is bounded as before: a refusal is neither an entry, nor a use of one
+   db.clearCachedStatements();
+   db.setStatementCacheLimit(2);
+   requireLongEquals(11, scalar(db, "select 11"), "A");
+   requireLongEquals(12, scalar(db, "select 12"), "B");
+   for (Entry entry : ALL_ENTRIES) {
+      require(!callEntry(db, entry, "select 11; select 13", false).accepted, entryName(entry) + ": refused");
+      require(!callEntry(db, entry, "select 14" + NUL, false).accepted, entryName(entry) + ": refused, with a NUL byte");
+   }
+   requireLongEquals(14, scalar(db, "select 14"), "C");
+   require(openStatementSql(db) == (vector<string>{"select 12", "select 14"}),
+           "A, the least recently used, went to make room for C: " + describe(openStatementSql(db)));
+   db.setStatementCacheLimit(128);
+
+   // SQL with a harmless tail is cached as any SQL, and reused
+   db.clearCachedStatements();
+   requireLongEquals(1, scalar(db, "select 1;  -- note"), "a query with a tail");
+   const vector<sqlite3_stmt*> withTail = openStatementHandles(db);
+   requireLongEquals(1, static_cast<long long>(withTail.size()), "cached");
+   requireLongEquals(1, scalar(db, "select 1;  -- note"), "again");
+   requireLongEquals(1, scalar(db, "select 1;  -- note"), "and again");
+   require(openStatementHandles(db) == withTail, "by the same statement each time");
+   require(exec(db, "insert into log(m) values ('r');"), "an update with a tail");
+   const vector<sqlite3_stmt*> updateWithTail = openStatementHandles(db);
+   requireLongEquals(2, static_cast<long long>(updateWithTail.size()), "cached");
+   require(exec(db, "insert into log(m) values ('r');") && exec(db, "insert into log(m) values ('r');"), "twice more");
+   require(openStatementHandles(db) == updateWithTail, "by the same statement each time");
+   requireStringEquals("table:log,table:t||c,c,r,r,r", boundaryWorld(path), "each run stored one row");
+
+   // with no cache nothing is kept, refused or not
+   db.setShouldCacheStatements(false);
+   db.clearCachedStatements();
+   require(openStatementHandles(db).empty(), "nothing is open");
+   for (const string& sql : refused) {
+      for (Entry entry : ALL_ENTRIES) {
+         require(!callEntry(db, entry, sql, false).accepted, entryName(entry) + ": refused, uncached: " + sql);
+         require(openStatementHandles(db).empty(), entryName(entry) + ": and nothing is open");
+      }
+   }
+
+   db.close();
+}
+
+void TestSQLiteFoundation::test_statement_boundary_with_transactions_and_cursors() {
+   TEST_CASE("test_statement_boundary_with_transactions_and_cursors");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("boundary_context.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "pragma synchronous = off"), "no fsync: the cases make many small changes");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      require(resetBoundaryFixture(db), when + ": fixture");
+
+      // a refusal in the middle of a transaction leaves the transaction as it was
+      require(db.beginDeferredTransaction(), when + ": begin");
+      require(exec(db, "insert into t(v) values ('in transaction')"), when + ": an insert");
+      for (Entry entry : ALL_ENTRIES) {
+         const CallResult r = callEntry(db, entry, "insert into t(v) values ('lost'); insert into t(v) values ('lost too')", false);
+         require(!r.accepted, when + ": " + entryName(entry) + ": refused");
+         require(db.inTransaction(), when + ": " + entryName(entry) + ": the transaction is still open");
+      }
+      require(exec(db, "insert into t(v) values ('second')"), when + ": and goes on");
+      require(db.commit(), when + ": commit");
+      requireStringEquals("table:log,table:t|in transaction,second|", boundaryWorld(path),
+                          when + ": only what was asked for singly is stored");
+
+      // a refusal made as the first call is no transaction at all
+      require(!exec(db, "begin; insert into t(v) values ('never')"), when + ": BEGIN and a statement is refused");
+      require(!db.inTransaction(), when + ": no transaction was started");
+      require(!exec(db, "rollback; commit"), when + ": ROLLBACK and COMMIT in one call are refused");
+
+      // a live result set is not disturbed by a refusal
+      require(exec(db, "insert into t(v) values ('third')"), when + ": a third row");
+      unique_ptr<SQLiteResultSet> reading(openCursor(db, "select v from t order by rowid"));
+      require(reading && reading->next(), when + ": a result set, on its first row");
+      for (Entry entry : ALL_ENTRIES) {
+         const CallResult r = callEntry(db, entry, "select v from t order by rowid; select 2", false);
+         require(!r.accepted, when + ": " + entryName(entry) + ": the same SQL and another statement is refused");
+      }
+      string value;
+      require(reading->stringForColumnIndex(0, value) && value == "in transaction", when + ": the result set is where it was");
+      require(reading->next() && reading->stringForColumnIndex(0, value) && value == "second", when + ": and goes on");
+      require(reading->next() && reading->stringForColumnIndex(0, value) && value == "third", when + ": to the end");
+      require(!reading->next(), when + ": which is the end");
+      reading.reset();
+   }
+
    db.close();
 }

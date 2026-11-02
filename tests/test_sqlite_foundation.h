@@ -40,6 +40,11 @@ class SQLiteResultSet;
  * an open database and a failed open() (CH-12), and the bounded, least recently
  * used statement cache (CH-13).
  *
+ * Also covers the one-statement-per-call contract of executeQuery() and
+ * executeUpdate() (CH-27): a second statement, trailing text that is not SQL, or a
+ * NUL byte refuses the whole call before anything is run, cached or kept; whitespace,
+ * semicolons and comments after the statement are accepted.
+ *
  * Also covers the busy timeout setting (CH-07) and the result-set status and
  * error code (CH-08). Lock contention itself -- which waits on purpose -- is
  * exercised in bounded subprocesses, see tests/regression/.
@@ -109,6 +114,10 @@ protected:
    void test_query_with_result_columns_stays_lazy();
    void test_query_without_result_columns_that_fails();
    void test_query_without_result_columns_reentrancy();
+   void test_statement_boundary_refusals();
+   void test_statement_boundary_accepts();
+   void test_statement_boundary_and_the_statement_cache();
+   void test_statement_boundary_with_transactions_and_cursors();
 
    void requireLongEquals(long long expected,
                           long long actual,

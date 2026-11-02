@@ -56,4 +56,8 @@ set(CHAPEAU_FIXED_TABLE
    # CH-18 (H1a-9): executeQuery() runs a statement that has no result columns before
    # it returns, instead of leaving it to a next() that nobody calls
    "CH-18|ch18_query_without_columns_never_stepped|60|executeQuery() never ran INSERT/UPDATE/DELETE/DDL unless the result set was stepped"
+   # CH-27 (H1a-11): one statement per call; a second statement or a NUL byte refuses
+   # the whole call before anything runs, and is reported once
+   "CH-27|ch27_multi_statement_sql_refused_before_anything_runs|60|the first statement of multi-statement SQL ran and the call reported success"
+   "CH-27|ch27_refusal_is_logged_once_and_silent_when_off|60|a refused statement boundary must be reported exactly once, and only when asked"
 )

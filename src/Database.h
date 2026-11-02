@@ -67,7 +67,8 @@ enum class DBErrorKind {
    NoConnection,     // there is no open connection
    AlreadyOpen,      // open() on a database that is already open
    InUse,            // the database was used while one of its operations was running
-   RefusedStatement  // executeUpdate() was given a statement that returns rows
+   RefusedStatement  // the SQL was refused without being run: a statement that returns rows given to
+                     // executeUpdate(), or SQL with more than one statement or a NUL byte
 };
 
 /**
@@ -339,6 +340,14 @@ public:
     * PRAGMA that reads a value, INSERT ... RETURNING, EXPLAIN, VALUES -- is
     * refused without being run, even if it would return no rows; use
     * executeQuery() for those.
+    *
+    * One statement per call: sql may hold only one, and after it only
+    * whitespace, semicolons and comments. A second statement, text after the
+    * statement that is not valid SQL, or a NUL byte anywhere in sql is refused
+    * as a whole (DBErrorKind::RefusedStatement, code 0, the message says where),
+    * before anything is run: the first statement is not run either, and the
+    * database is not changed. There is no call that runs a script; run each
+    * statement with a call of its own.
     * @param sql
     * @param rowsAffectedCount the rows changed, or 0 when this returns false
     * @return true if the statement ran to completion; false if it failed or was
@@ -388,9 +397,18 @@ public:
     *    (the rows are exhausted, or the result set is closed or destroyed).
     * To run a statement and not keep a result set, executeUpdate() is the
     * call for one without rows.
+    *
+    * One statement per call: sql may hold only one, and after it only
+    * whitespace, semicolons and comments. A second statement, text after the
+    * statement that is not valid SQL, or a NUL byte anywhere in sql is refused
+    * as a whole (DBErrorKind::RefusedStatement, code 0, the message says where),
+    * before anything is run: the result is nullptr, the first statement is not
+    * run, and the database is not changed. Empty SQL, or SQL of only
+    * whitespace, semicolons and comments, is not refused: it has no statement,
+    * and the result set is Done at once.
     * @param sql
     * @return the result set, or nullptr if the statement could not be
-    * prepared; lastErrorKind() says why
+    * prepared or was refused; lastErrorKind() says why
     * @see DBResultSet()
     */
    virtual DBResultSet* executeQuery(const std::string& sql) = 0;
@@ -402,7 +420,8 @@ public:
     * (DBErrorKind::BindFailed), nothing is run and there is no result set: it
     * is never run with a parameter left unbound (NULL). A statement without
     * result columns is run before this returns, and one with result columns is
-    * run by stepping the result set, exactly as for the overload above.
+    * run by stepping the result set, exactly as for the overload above, and
+    * sql holds one statement at most, as there.
     * @param sql
     * @param args
     * @return the result set, or nullptr; lastErrorKind() says why

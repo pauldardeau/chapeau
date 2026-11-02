@@ -120,12 +120,38 @@ bool SQLiteDatabase::open() {
 bool SQLiteDatabase::prepareStatement(const std::string& sql,
                                       sqlite3_stmt** ppStmt,
                                       const char* operation) {
+   *ppStmt = nullptr;
+
+   // SQLite reads the text up to its first NUL byte and stops there, so the
+   // rest would be dropped without a word -- including statements after it.
+   // Checked before anything is prepared.
+   const std::string::size_type nulOffset = sql.find('\0');
+
+   if (nulOffset != std::string::npos) {
+      std::string shown;
+      for (const char c : sql) {
+         if ('\0' == c) {
+            shown += "\\0";
+         } else {
+            shown += c;
+         }
+      }
+
+      fail(DBErrorKind::RefusedStatement, 0,
+           "the SQL contains a NUL byte at offset " + std::to_string(nulOffset) +
+           "; nothing was run",
+           operation,
+           shown);
+      return false;
+   }
+
    // a prepare that has to read the schema needs a lock, and waits for it as
    // long as the busy timeout allows
-   const int rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, ppStmt, 0);
+   const char* tail = nullptr;
+   const int rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, ppStmt, &tail);
 
    if (SQLITE_OK == rc) {
-      return true;
+      return !refuseTrailingSql(sql, tail, ppStmt, operation);
    }
 
    // SQLite's explanation is taken before anything else is called on the
@@ -138,6 +164,60 @@ bool SQLiteDatabase::prepareStatement(const std::string& sql,
    fail(DBErrorKind::Sqlite, rc, message, operation, sql);
 
    return false;
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::refuseTrailingSql(const std::string& sql,
+                                       const char* tail,
+                                       sqlite3_stmt** ppStmt,
+                                       const char* operation) {
+   if (nullptr == tail || '\0' == *tail) {
+      return false;
+   }
+
+   // What is left after the first statement is prepared to tell what it is,
+   // not to be run. Whitespace, semicolons and comments prepare to no
+   // statement at all, and that is all that may follow. Anything else is a
+   // statement or an error, however it comes out; a statement that depends on
+   // the first one (it uses a table the first creates) cannot be prepared yet,
+   // and is refused all the same. No parser is needed.
+   sqlite3_stmt* more = nullptr;
+   const int rc = ::sqlite3_prepare_v2(m_db, tail, -1, &more, nullptr);
+
+   if (SQLITE_OK == rc && nullptr == more) {
+      return false;
+   }
+
+   std::string reason;
+
+   if (SQLITE_OK != rc) {
+      reason = std::string("; the trailing SQL does not prepare: ") +
+               ::sqlite3_errmsg(m_db);
+   }
+
+   ::sqlite3_finalize(more);
+
+   // the first statement is let go of without having been run
+   ::sqlite3_finalize(*ppStmt);
+   *ppStmt = nullptr;
+
+   // the offset is that of the first byte of the trailing SQL that is not
+   // whitespace
+   const char* start = tail;
+   while (' ' == *start || '\t' == *start || '\n' == *start ||
+          '\r' == *start || '\f' == *start || '\v' == *start) {
+      ++start;
+   }
+
+   fail(DBErrorKind::RefusedStatement, 0,
+        "the SQL has more after its first statement, and only one statement "
+        "is allowed per call; nothing was run (the trailing SQL starts at "
+        "offset " + std::to_string(start - sql.c_str()) + ")" + reason,
+        operation,
+        sql);
+
+   return true;
 }
 
 //******************************************************************************

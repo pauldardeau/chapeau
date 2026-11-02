@@ -215,9 +215,24 @@ private:
    // prepares sql (sqlite3_prepare_v2) into *ppStmt; on failure *ppStmt is null
    // and the reason is recorded. A prepare that has to read the schema waits
    // for a lock for as long as the busy timeout allows.
+   //
+   // sql must hold at most one statement: a NUL byte, or anything but
+   // whitespace, semicolons and comments after the first statement, is refused
+   // (RefusedStatement) before anything is run or cached. Every statement that
+   // is run or cached got here first, so the cache holds only such statements.
    bool prepareStatement(const std::string& sql,
                          sqlite3_stmt** ppStmt,
                          const char* operation);
+
+   // Called with what sqlite3_prepare_v2() left after the first statement. Only
+   // whitespace, semicolons and comments may follow it. Anything else -- a second
+   // statement, or text that is not SQL -- is refused: returns true, after
+   // recording it and finalizing *ppStmt (which is set to null). The trailing
+   // text is prepared to tell what it is, and never run.
+   bool refuseTrailingSql(const std::string& sql,
+                          const char* tail,
+                          sqlite3_stmt** ppStmt,
+                          const char* operation);
 
    // The result set for a statement that is ready to run (prepared, with its
    // arguments bound). Runs the statement first if it has no result columns,
