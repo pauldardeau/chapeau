@@ -94,11 +94,14 @@ bool SQLiteResultSet::isFinished() const {
 
 //******************************************************************************
 
-void SQLiteResultSet::finish(DBResultSetStatus finalStatus, int errorCode) {
+void SQLiteResultSet::finish(DBResultSetStatus finalStatus,
+                             int errorCode,
+                             const std::string& errorMessage) {
    // the first final state is the one that stays
    if (!isFinished()) {
       m_status = finalStatus;
       m_errorCode = errorCode;
+      m_errorMessage = errorMessage;
    }
 
    // ends the iteration for good: once the statement is released there is
@@ -130,6 +133,12 @@ int SQLiteResultSet::lastErrorCode() const {
 
 //******************************************************************************
 
+std::string SQLiteResultSet::lastErrorMessage() const {
+   return m_errorMessage;
+}
+
+//******************************************************************************
+
 void SQLiteResultSet::invalidate() {
    // the database is closing or being destroyed: it has already taken this
    // result set out of its own list, and must not be called back. A result
@@ -137,6 +146,7 @@ void SQLiteResultSet::invalidate() {
    if (!isFinished()) {
       m_status = DBResultSetStatus::Invalidated;
       m_errorCode = 0;
+      m_errorMessage.clear();
    }
    releaseStatement();
    m_parentDB = nullptr;
@@ -206,10 +216,12 @@ bool SQLiteResultSet::next() {
       return false;
    }
 
-   // a failed step is not the end of the data: say so, keep the error code
-   // for after the statement is released, and do not try the query again
-   m_parentDB->reportStepError("next()", rc, query());
-   finish(DBResultSetStatus::Error, rc);
+   // a failed step is not the end of the data: say so, keep the error code and
+   // SQLite's message for after the statement is released, and do not try the
+   // query again. The database records the failure too (and logs it, if it is
+   // set to).
+   const std::string message = m_parentDB->stepFailed("next()", rc, query());
+   finish(DBResultSetStatus::Error, rc, message);
    return false;
 }
 

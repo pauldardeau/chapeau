@@ -33,7 +33,8 @@ class Date;
  *   next() returned true                   Row,         0
  *   data exhausted (next() false)          Done,        0
  *   close() on an active result set        Done,        0
- *   sqlite3_step failed, busy included     Error,       the sqlite3_step result
+ *   sqlite3_step failed, busy included     Error,       the sqlite3_step result,
+ *                                                       and lastErrorMessage()
  *   database closed or destroyed under an
  *     active result set                    Invalidated, 0
  *
@@ -100,6 +101,16 @@ public:
     * statement was released.
     */
    int lastErrorCode() const;
+
+   /**
+    * @return SQLite's message for the failure that ended this result set
+    * ("UNIQUE constraint failed: t.id", "database is locked") when status() is
+    * DBResultSetStatus::Error, otherwise empty. It is copied when the step
+    * fails, so it stays, like the code, after the statement is released, after
+    * next() is called again, after close(), after the database is closed or
+    * destroyed, and whatever the database is used for afterwards.
+    */
+   std::string lastErrorMessage() const;
 
    /**
     *
@@ -324,7 +335,9 @@ private:
 
    // ends the result set: the first final state wins (see the class comment),
    // then the statement is released
-   void finish(DBResultSetStatus finalStatus, int errorCode);
+   void finish(DBResultSetStatus finalStatus,
+               int errorCode,
+               const std::string& errorMessage = std::string());
 
    bool isFinished() const;
 
@@ -337,6 +350,7 @@ private:
    mutable bool m_columnNamesSetup;
    DBResultSetStatus m_status;
    int m_errorCode;
+   std::string m_errorMessage;
 
    SQLiteResultSet();
    SQLiteResultSet(const SQLiteResultSet&);

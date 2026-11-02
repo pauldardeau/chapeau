@@ -56,6 +56,14 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   timeout behaves and what a locked database does to queries, updates,
   transactions and `close()`. They wait for a lock on purpose, so they run in
   bounded subprocesses (default set, label `regression`).
+* **Error-reporting scenarios** (`errors_*` in `chapeau_probe.cpp`, H1a-8): every
+  kind of failure is fired with `setLogsErrors(true)` and `(false)`. The scenario
+  captures the process's own stdout around each call, so it can say that exactly
+  one `DB Error [...]` line was written (kind, code, message, operation, SQL) when
+  logging is on, that nothing at all was written when it is off, and that the
+  return value and the recorded error are the same either way. The busy failure
+  of an update and of a cursor is checked in its own bounded process. (Stdout
+  capture uses POSIX `dup2`; on Windows the capture is a no-op.)
 
 ## Seeing the defects
 

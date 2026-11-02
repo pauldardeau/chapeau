@@ -126,16 +126,26 @@ foreach(scenario
       TIMEOUT 60 LABEL regression)
 endforeach()
 
+# how errors are reported (H1a-8): logged once, with kind, code and message, only
+# when setLogsErrors() is on; the busy details in one bounded process
+foreach(scenario
+   errors_logged_once_with_kind_code_and_message
+   errors_silent_when_logging_is_off
+   errors_busy_is_recorded_and_recovers)
+   chapeau_add_case(regression_${scenario} chapeau_probe ${scenario}
+      TIMEOUT 60 LABEL regression)
+endforeach()
+
 # the messages printed for a failed sqlite3_step: SQLite's own code and text,
 # and no "Unknown error" for a code SQLite defines
 chapeau_add_case(regression_diagnostics_step_error_messages chapeau_probe
    diagnostics_step_error_messages
    TIMEOUT 60 LABEL regression
    MATCH
-      "Error calling sqlite3_step in executeUpdate [(]19: UNIQUE constraint failed: t[.]id[)]"
-      "Error calling sqlite3_step in next[(][)] [(]19: UNIQUE constraint failed: t[.]id[)]"
-      "Error calling sqlite3_step in next[(][)] [(]1: integer overflow[)]"
-      "Database busy [(][^)]*[)]: executeUpdate gave up after waiting 100 ms for the lock"
+      "DB Error [[]Sqlite[]] code=19: UNIQUE constraint failed: t[.]id in executeUpdate"
+      "DB Error [[]Sqlite[]] code=19: UNIQUE constraint failed: t[.]id in next[(][)]"
+      "DB Error [[]Sqlite[]] code=1: integer overflow in next[(][)]"
+      "DB Error [[]Sqlite[]] code=5: database is locked [(]gave up after waiting 100 ms[)] in executeUpdate"
    REJECT
       "Unknown error")
 

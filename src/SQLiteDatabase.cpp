@@ -49,8 +49,7 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
    m_inUse(false),
    m_traceExecution(false),
    m_checkedOut(false),
-   m_busyRetryTimeout(DEFAULT_BUSY_TIMEOUT_MS),
-   m_openErrorCode(SQLITE_OK) {
+   m_busyRetryTimeout(DEFAULT_BUSY_TIMEOUT_MS) {
 }
 
 //******************************************************************************
@@ -81,11 +80,14 @@ sqlite3* SQLiteDatabase::sqliteHandle() {
 //******************************************************************************
 
 bool SQLiteDatabase::open() {
+   clearLastError();
+
    if (m_db != nullptr) {
       // already open: whatever is going on on this connection -- result sets,
       // a transaction, cached statements -- stays exactly as it is
-      Logger::warning("open() on a database that is already open: '" +
-                      m_databasePath + "' (the connection is unchanged)");
+      fail(DBErrorKind::AlreadyOpen, 0,
+           "the database is already open; the connection is unchanged",
+           "open");
       return false;
    }
 
@@ -94,20 +96,17 @@ bool SQLiteDatabase::open() {
    const int err = ::sqlite3_open(m_databasePath.c_str(), &handle);
    if (err != SQLITE_OK) {
       // sqlite3_open hands back a handle even when it fails, and that handle
-      // has to be closed; its reason is kept for lastErrorCode()
-      m_openErrorCode = (handle != nullptr) ? ::sqlite3_errcode(handle) : err;
-      m_openErrorMessage = (handle != nullptr) ? ::sqlite3_errmsg(handle)
-                                               : ::sqlite3_errstr(err);
+      // has to be closed; the reason is taken from it first
+      const int code = (handle != nullptr) ? ::sqlite3_errcode(handle) : err;
+      const std::string message = (handle != nullptr) ? ::sqlite3_errmsg(handle)
+                                                      : ::sqlite3_errstr(err);
       ::sqlite3_close(handle);
 
-      Logger::error("unable to open database '" + m_databasePath + "'");
-      ::printf("rc=%d\n", err);
+      fail(DBErrorKind::Sqlite, code, message, "open", m_databasePath);
       return false;
    }
 
    m_db = handle;
-   m_openErrorCode = SQLITE_OK;
-   m_openErrorMessage.clear();
 
    // the timeout set so far (the default, or what the caller chose before
    // opening) takes effect on the new connection
@@ -119,7 +118,8 @@ bool SQLiteDatabase::open() {
 //******************************************************************************
 
 bool SQLiteDatabase::prepareStatement(const std::string& sql,
-                                      sqlite3_stmt** ppStmt) {
+                                      sqlite3_stmt** ppStmt,
+                                      const char* operation) {
    // a prepare that has to read the schema needs a lock, and waits for it as
    // long as the busy timeout allows
    const int rc = ::sqlite3_prepare_v2(m_db, sql.c_str(), -1, ppStmt, 0);
@@ -128,20 +128,14 @@ bool SQLiteDatabase::prepareStatement(const std::string& sql,
       return true;
    }
 
+   // SQLite's explanation is taken before anything else is called on the
+   // connection
+   const std::string message = ::sqlite3_errmsg(m_db);
+
    ::sqlite3_finalize(*ppStmt);
    *ppStmt = nullptr;
 
-   if (SQLITE_BUSY == rc) {
-      ::printf("Database busy (%s): could not prepare the statement within %d ms\n",
-               m_databasePath.c_str(),
-               m_busyRetryTimeout);
-      Logger::warning("Database busy");
-   } else if (m_logsErrors) {
-      ::printf("DB Error: %d \"%s\"\n",
-               lastErrorCode(),
-               lastErrorMessage().c_str());
-      ::printf("DB Query: %s\n", sql.c_str());
-   }
+   fail(DBErrorKind::Sqlite, rc, message, operation, sql);
 
    return false;
 }
@@ -162,9 +156,10 @@ bool SQLiteDatabase::refuseRowReturningUpdate(sqlite3_stmt* pStmt,
       return false;
    }
 
-   ::printf("Error: executeUpdate was given a statement that returns rows; "
-            "use executeQuery (%s)\n",
-            sql.c_str());
+   fail(DBErrorKind::RefusedStatement, 0,
+        "the statement returns rows and was not run; use executeQuery",
+        "executeUpdate",
+        sql);
 
    // finalize only a statement prepared for this call. One that came from
    // the cache is still the cache's, and stays valid for later executions.
@@ -177,26 +172,141 @@ bool SQLiteDatabase::refuseRowReturningUpdate(sqlite3_stmt* pStmt,
 
 //******************************************************************************
 
-void SQLiteDatabase::reportStepError(const char* where,
-                                      int rc,
-                                      const std::string& sql) {
-   if (SQLITE_BUSY == rc) {
-      ::printf("Database busy (%s): %s gave up after waiting %d ms for the lock\n",
-               m_databasePath.c_str(),
-               where,
-               m_busyRetryTimeout);
-      Logger::warning("Database busy");
-   } else {
-      // whatever SQLite returned, with its own explanation of it
-      ::printf("Error calling sqlite3_step in %s (%d: %s)\n",
-               where,
-               rc,
-               ::sqlite3_errmsg(m_db));
+void SQLiteDatabase::fail(DBErrorKind kind,
+                          int code,
+                          const std::string& message,
+                          const char* operation,
+                          const std::string& detail) {
+   // the record comes first and does not depend on the logging switch
+   setLastError(kind, code, message);
+
+   if (!m_logsErrors) {
+      return;
    }
 
-   if (!sql.empty()) {
-      ::printf("DB Query: %s\n", sql.c_str());
+   std::string line = std::string("DB Error [") + dbErrorKindName(kind) + "]";
+
+   if (code != 0) {
+      line += " code=" + std::to_string(code);
    }
+
+   line += ": " + message;
+
+   if (DBErrorKind::Sqlite == kind && SQLITE_BUSY == code) {
+      line += " (gave up after waiting " +
+              std::to_string(m_busyRetryTimeout) + " ms)";
+   }
+
+   line += std::string(" in ") + operation;
+
+   if (!detail.empty()) {
+      line += ": " + detail;
+   }
+
+   line += " (database: " + m_databasePath + ")";
+
+   ::printf("%s\n", line.c_str());
+}
+
+//******************************************************************************
+
+std::string SQLiteDatabase::stepFailed(const char* operation,
+                                       int rc,
+                                       const std::string& sql) {
+   // SQLite's explanation of this very failure, before the statement is reset
+   const std::string message = (m_db != nullptr) ? ::sqlite3_errmsg(m_db)
+                                                 : ::sqlite3_errstr(rc);
+   fail(DBErrorKind::Sqlite, rc, message, operation, sql);
+   return message;
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::bindCountFailed(const char* operation,
+                                     const std::string& sql,
+                                     size_t parameterCount,
+                                     size_t argumentCount) {
+   fail(DBErrorKind::BindCount, 0,
+        "the statement has " + std::to_string(parameterCount) +
+        " parameter(s) but " + std::to_string(argumentCount) +
+        " argument(s) were given",
+        operation,
+        sql);
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::bindArguments(const char* operation,
+                                   const std::string& sql,
+                                   const DBStatementArgs& args,
+                                   SQLiteStatement* statement) {
+   const size_t argCount = args.size();
+
+   for (size_t idx = 0; idx < argCount; ++idx) {
+      const int parameter = static_cast<int>(idx) + 1;
+      const DBAbstractDataType* arg = args[idx];
+      bool bound = false;
+
+      if (arg != nullptr) {
+         if (m_traceExecution) {
+            ::printf("obj: %s (%s)\n",
+                     arg->valueAsString().c_str(),
+                     arg->typeName().c_str());
+         }
+
+         bound = arg->bind(this, parameter, statement);
+      } else {
+         if (m_traceExecution) {
+            ::printf("obj: <null>\n");
+         }
+
+         bound = bindNull(parameter, statement);
+      }
+
+      if (!bound) {
+         // a bind function that was refused by SQLite has recorded SQLite's
+         // code and message; one that failed for another reason has not, and
+         // then there is no code to give
+         int code = 0;
+         std::string reason = "the argument could not be bound";
+
+         if (DBErrorKind::BindFailed == lastErrorKind()) {
+            code = lastErrorCode();
+            reason = lastErrorMessage();
+         }
+
+         fail(DBErrorKind::BindFailed, code,
+              "parameter " + std::to_string(parameter) + ": " + reason,
+              operation,
+              sql);
+         return false;
+      }
+   }
+
+   return true;
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::bindResult(int rc) {
+   if (SQLITE_OK == rc) {
+      return true;
+   }
+
+   // SQLite sets the connection's error for most failures of a bind call; when
+   // it did not, the text for the code stands in for it
+   const std::string message =
+      (m_db != nullptr && ::sqlite3_errcode(m_db) == rc) ? ::sqlite3_errmsg(m_db)
+                                                         : ::sqlite3_errstr(rc);
+   setLastError(DBErrorKind::BindFailed, rc, message);
+   return false;
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::noStatementToBind() {
+   setLastError(DBErrorKind::BindFailed, 0, "there is no statement to bind to");
+   return false;
 }
 
 //******************************************************************************
@@ -259,6 +369,8 @@ void SQLiteDatabase::discardCachedStatement(DBStatement* statement) {
 //******************************************************************************
 
 void SQLiteDatabase::close() {
+   clearLastError();
+
    // live result sets give up their statements first, so that every
    // statement can be finalized and the connection actually closes
    invalidateCursors();
@@ -279,20 +391,27 @@ void SQLiteDatabase::close() {
       Logger::warning("Database busy, closing with unfinalized statements");
       rc = ::sqlite3_close_v2(m_db);
    }
-   if (SQLITE_OK != rc) {
-      ::printf("error closing!: %d\n", rc);
-   }
+   const std::string closeMessage =
+      (SQLITE_OK != rc) ? ::sqlite3_errstr(rc) : std::string();
 
    m_db = nullptr;
+
+   if (SQLITE_OK != rc) {
+      fail(DBErrorKind::Sqlite, rc, closeMessage, "close", m_databasePath);
+   }
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::goodConnection() {
    if (!m_db) {
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "goodConnection");
       return false;
    }
 
+   // executeQuery() starts by clearing the error and records its own failure,
+   // which is then this one
    DBResultSet* rs =
       executeQuery("select name from sqlite_master where type='table'");
 
@@ -308,7 +427,9 @@ bool SQLiteDatabase::goodConnection() {
 //******************************************************************************
 
 void SQLiteDatabase::complainAboutInUse() {
-   Logger::warning("The SQLiteDatabase is currently in use.");
+   fail(DBErrorKind::InUse, 0,
+        "the database is in use by an operation that has not finished",
+        "use of the database");
 
    if (m_crashOnErrors) {
    }
@@ -316,34 +437,19 @@ void SQLiteDatabase::complainAboutInUse() {
 
 //******************************************************************************
 
-std::string SQLiteDatabase::lastErrorMessage() {
-   if (m_db == nullptr) {
-      // no connection to ask: the reason the last open() failed, if it did
-      return m_openErrorMessage.empty() ? std::string("not an error")
-                                        : m_openErrorMessage;
-   }
-   return std::string(::sqlite3_errmsg(m_db));
-}
-
-//******************************************************************************
-
-bool SQLiteDatabase::hadError() {
-   return (lastErrorCode() != SQLITE_OK);
-}
-
-//******************************************************************************
-
-int SQLiteDatabase::lastErrorCode() {
-   if (m_db == nullptr) {
-      // no connection to ask: the reason the last open() failed, if it did
-      return m_openErrorCode;
-   }
-   return ::sqlite3_errcode(m_db);
+bool SQLiteDatabase::hadError() const {
+   return (lastErrorKind() != DBErrorKind::None);
 }
 
 //******************************************************************************
 
 long long int SQLiteDatabase::lastInsertRowId() {
+   if (nullptr == m_db) {
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "lastInsertRowId");
+      return -1;
+   }
+
    if (m_inUse) {
       complainAboutInUse();
       return -1;
@@ -356,135 +462,102 @@ long long int SQLiteDatabase::lastInsertRowId() {
 //******************************************************************************
 
 bool SQLiteDatabase::bindNull(int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_null(stmt->statement(), idx);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_null(stmt->statement(), idx));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindData(const DBData* data, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      // SQLite binds NULL when the pointer it is given is null, whatever the
-      // length, and an empty DBData has no buffer to point to. A zero-length
-      // BLOB is asked for explicitly, so that it is not stored as NULL; NULL
-      // itself is bound by bindNull() (DBNull, or a null argument).
-      const int rc = (data->length() == 0)
-         ? ::sqlite3_bind_zeroblob(stmt->statement(), idx, 0)
-         : ::sqlite3_bind_blob(stmt->statement(),
-                               idx,
-                               data->value(),
-                               (int) data->length(),
-                               SQLITE_TRANSIENT);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   // SQLite binds NULL when the pointer it is given is null, whatever the
+   // length, and an empty DBData has no buffer to point to. A zero-length
+   // BLOB is asked for explicitly, so that it is not stored as NULL; NULL
+   // itself is bound by bindNull() (DBNull, or a null argument).
+   const int rc = (data->length() == 0)
+      ? ::sqlite3_bind_zeroblob(stmt->statement(), idx, 0)
+      : ::sqlite3_bind_blob(stmt->statement(),
+                            idx,
+                            data->value(),
+                            (int) data->length(),
+                            SQLITE_TRANSIENT);
+   return bindResult(rc);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindDate(const DBDate* value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_double(stmt->statement(),
-                          idx,
-                          value->timeIntervalSince1970());
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_double(stmt->statement(),
+                                           idx,
+                                           value->timeIntervalSince1970()));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindBool(bool value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_int(stmt->statement(), idx, (value ? 1 : 0));
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
-   } else {
-      ::printf("error: bindBool failure (no statement)\n");
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_int(stmt->statement(), idx, (value ? 1 : 0)));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindInt(int value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_int64(stmt->statement(), idx, value);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_int64(stmt->statement(), idx, value));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindLong(long value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_int64(stmt->statement(), idx, value);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_int64(stmt->statement(), idx, value));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindFloat(float value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_double(stmt->statement(), idx, value);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_double(stmt->statement(), idx, value));
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::bindDouble(double value, int idx, DBStatement* statement) {
-   bool bindSuccess = false;
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
-   if (stmt) {
-      const int rc = ::sqlite3_bind_double(stmt->statement(), idx, value);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      }
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_double(stmt->statement(), idx, value));
 }
 
 //******************************************************************************
@@ -492,34 +565,26 @@ bool SQLiteDatabase::bindDouble(double value, int idx, DBStatement* statement) {
 bool SQLiteDatabase::bindString(const std::string& value,
                             int idx,
                             DBStatement* statement) {
-   bool bindSuccess = false;
-   SQLiteStatement* stmt =
-      dynamic_cast<SQLiteStatement*>(statement);
-
-   if (stmt && stmt->statement()) {
-      const int rc = ::sqlite3_bind_text(stmt->statement(),
-                        idx,
-                        value.c_str(),
-                        value.length(),
-                        SQLITE_TRANSIENT);
-      if (rc == SQLITE_OK) {
-         bindSuccess = true;
-      } else {
-         ::printf("sqlite3_bind_text failed, rc = %d (%s)\n",
-                  rc, ::sqlite3_errmsg(m_db));
-      }
-   } else {
-      ::printf("bindString failure, no statement\n");
+   SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
+   if (!stmt || !stmt->statement()) {
+      return noStatementToBind();
    }
 
-   return bindSuccess;
+   return bindResult(::sqlite3_bind_text(stmt->statement(),
+                                         idx,
+                                         value.c_str(),
+                                         value.length(),
+                                         SQLITE_TRANSIENT));
 }
 
 //******************************************************************************
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
+   clearLastError();
+
    if (nullptr == m_db) {
-      ::printf("error: no database connection\n");
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "executeQuery", sql);
       return nullptr;
    }
 
@@ -552,7 +617,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
    const bool cacheThis = cacheStatements && !slotTaken;
 
    if (!pStmt) {
-      if (!prepareStatement(sql, &pStmt)) {
+      if (!prepareStatement(sql, &pStmt, "executeQuery")) {
          return nullptr;
       }
    }
@@ -560,13 +625,14 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
    const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
 
    if (0 != queryCount) {
-      Logger::error("the bind count is not correct for the # of variables (executeQuery)");
-
       // finalize only a statement prepared for this call. One that came from
-      // the cache is still the cache's, and stays valid for later executions.
+      // the cache is still the cache's, and stays valid for later executions
+      // (nothing was bound to it).
       if (!statement) {
          ::sqlite3_finalize(pStmt);
       }
+
+      bindCountFailed("executeQuery", sql, queryCount, 0);
       return nullptr;
    }
 
@@ -588,8 +654,11 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                                           const DBStatementArgs& args) {
+   clearLastError();
+
    if (nullptr == m_db) {
-      ::printf("error: no database connection\n");
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "executeQuery", sql);
       return nullptr;
    }
 
@@ -624,7 +693,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
    const bool cacheThis = cacheStatements && !slotTaken;
 
    if (!pStmt) {
-      if (!prepareStatement(sql, &pStmt)) {
+      if (!prepareStatement(sql, &pStmt, "executeQuery")) {
          return nullptr;
       }
    }
@@ -634,42 +703,31 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
    const bool isNewlyCreatedStatement = !statement;
 
+   if (argCount != queryCount) {
+      // counted before anything is bound, so that no surplus argument is bound
+      // to a parameter that does not exist. A statement from the cache is still
+      // valid and may be in use elsewhere, so only one prepared for this call
+      // is finalized.
+      if (isNewlyCreatedStatement) {
+         ::sqlite3_finalize(pStmt);
+      }
+
+      bindCountFailed("executeQuery", sql, queryCount, argCount);
+      return nullptr;
+   }
+
    if (isNewlyCreatedStatement) {
       statement = new SQLiteStatement(pStmt, cacheThis);
    }
 
-   size_t idx = 0;
-
-   for (; idx < argCount; ++idx) {
-      const DBAbstractDataType* arg = args[idx];
-
-      if (arg != nullptr) {
-         if (m_traceExecution) {
-            ::printf("obj: %s (%s)\n",
-                     arg->valueAsString().c_str(),
-                     arg->typeName().c_str());
-         }
-
-         arg->bind(this, idx+1, statement);
-      } else {
-         if (m_traceExecution) {
-            ::printf("obj: <null>\n");
-         }
-
-         bindNull(idx+1, statement);
-      }
-   }
-
-   if (idx != queryCount) {
-      Logger::error("the bind count is not correct for the # of variables (executeQuery)");
-
-      // only tear down a statement created for this call -- one reused
-      // from the cache is still valid and may be in use elsewhere, so it
-      // must not be finalized/deleted here
+   if (!bindArguments("executeQuery", sql, args, statement)) {
+      // the statement is not run. Only one created for this call is torn down
+      // -- one reused from the cache is still valid and may be in use
+      // elsewhere, so it must not be finalized/deleted here
       if (isNewlyCreatedStatement) {
          delete statement;
       } else {
-         // drop the values bound for the failed call; the statement itself
+         // drop the values bound before the failure; the statement itself
          // stays valid and idle in the cache
          statement->clearBindings();
       }
@@ -677,9 +735,8 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
       return nullptr;
    }
 
-   // deferred until after the bind-count check succeeds, so a mismatched
-   // call never leaves a cache entry pointing at an already-finalized
-   // statement
+   // deferred until after the bind checks succeed, so a failed call never
+   // leaves a cache entry pointing at an already-finalized statement
    if (isNewlyCreatedStatement && cacheThis) {
       setCachedStatement(statement, sql);
    }
@@ -694,9 +751,12 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    unsigned long& rowsAffectedCount) {
+   clearLastError();
+
    if (nullptr == m_db) {
       rowsAffectedCount = 0L;
-      ::printf("error: no database connection\n");
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "executeUpdate", sql);
       return false;
    }
 
@@ -732,7 +792,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const bool cacheThis = cacheStatements && !slotTaken;
 
    if (!pStmt) {
-      if (!prepareStatement(sql, &pStmt)) {
+      if (!prepareStatement(sql, &pStmt, "executeUpdate")) {
          rowsAffectedCount = 0L;
          return false;
       }
@@ -746,14 +806,14 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
 
    if (0 != queryCount) {
-      ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
-               sql.c_str());
-
       // finalize only a statement prepared for this call. One that came from
-      // the cache is still the cache's, and stays valid for later executions.
+      // the cache is still the cache's, and stays valid for later executions
+      // (nothing was bound to it).
       if (!cachedStmt) {
          ::sqlite3_finalize(pStmt);
       }
+
+      bindCountFailed("executeUpdate", sql, queryCount, 0);
       rowsAffectedCount = 0L;
       return false;
    }
@@ -766,13 +826,12 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    // other error
    rc = ::sqlite3_step(pStmt);
 
-   if (SQLITE_DONE != rc && SQLITE_ROW != rc) {
-      reportStepError("executeUpdate", rc, sql);
+   if (SQLITE_DONE != rc) {
+      // recorded before the statement is reset or finalized below. (A
+      // statement without result columns, which is all that gets here, cannot
+      // return a row; if SQLite ever did, it would fail like any other.)
+      stepFailed("executeUpdate", rc, sql);
    }
-
-   // (a statement without result columns, which is all that gets here, cannot
-   // return a row; if SQLite ever did, rc would not be SQLITE_DONE and the call
-   // fails like any other)
 
    if (cacheThis && !cachedStmt) {
       cachedStmt = new SQLiteStatement(pStmt, true);
@@ -792,6 +851,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    bool sqlSuccess = (rc == SQLITE_DONE);
 
    if (sqlSuccess) {
+      // the result of this call is its own: whatever a re-entrant call made
+      // from inside it (an SQL function that used this database) recorded
+      // meanwhile does not stay. (executeQuery() runs no SQL, so no function
+      // of the caller's can run inside it.)
+      clearLastError();
       rowsAffectedCount = ::sqlite3_changes(m_db);
    } else {
       rowsAffectedCount = 0L;
@@ -805,8 +869,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    const DBStatementArgs& args,
                                    unsigned long& affectedRowsCount) {
+   clearLastError();
+
    if (nullptr == m_db) {
-      ::printf("error: no database connection\n");
+      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+           "executeUpdate", sql);
       affectedRowsCount = 0L;
       return false;
    }
@@ -843,7 +910,7 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    const bool cacheThis = cacheStatements && !slotTaken;
 
    if (!pStmt) {
-      if (!prepareStatement(sql, &pStmt)) {
+      if (!prepareStatement(sql, &pStmt, "executeUpdate")) {
          affectedRowsCount = 0L;
          return false;
       }
@@ -859,44 +926,33 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 
    const bool isNewlyCreatedStatement = !cachedStmt;
 
+   if (argsCount != queryCount) {
+      // counted before anything is bound, so that no surplus argument is bound
+      // to a parameter that does not exist. A statement from the cache is still
+      // valid and may be in use elsewhere, so only one prepared for this call
+      // is finalized.
+      if (isNewlyCreatedStatement) {
+         ::sqlite3_finalize(pStmt);
+      }
+
+      bindCountFailed("executeUpdate", sql, queryCount, argsCount);
+      affectedRowsCount = 0L;
+      return false;
+   }
+
    if (isNewlyCreatedStatement) {
       cachedStmt = new SQLiteStatement(pStmt, cacheThis);
    }
 
-   size_t idx = 0;
-
-   for (; idx < argsCount; ++idx) {
-      const DBAbstractDataType* arg = args[idx];
-
-      if (arg != nullptr) {
-         if (m_traceExecution) {
-            ::printf("obj: %s (%s)\n",
-                     arg->valueAsString().c_str(),
-                     arg->typeName().c_str());
-         }
-
-         arg->bind(this, idx+1, cachedStmt);
-      } else {
-         if (m_traceExecution) {
-            ::printf("obj: <null>\n");
-         }
-
-         bindNull(idx+1, cachedStmt);
-      }
-   }
-
-   if (idx != queryCount) {
-      ::printf("Error: the bind count is not correct for the # of variables (%s) (executeUpdate)\n",
-               sql.c_str());
-
-      // only tear down a statement created for this call -- one reused
-      // from the cache is still valid and may be in use elsewhere, so it
-      // must not be finalized/deleted here
+   if (!bindArguments("executeUpdate", sql, args, cachedStmt)) {
+      // the statement is not run. Only one created for this call is torn down
+      // -- one reused from the cache is still valid and may be in use
+      // elsewhere, so it must not be finalized/deleted here
       if (isNewlyCreatedStatement) {
          delete cachedStmt;
          cachedStmt = nullptr;
       } else {
-         // drop the values bound for the failed call; the statement itself
+         // drop the values bound before the failure; the statement itself
          // stays valid and idle in the cache
          cachedStmt->clearBindings();
       }
@@ -905,9 +961,8 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       return false;
    }
 
-   // deferred until after the bind-count check succeeds, so a mismatched
-   // call never leaves a cache entry pointing at an already-finalized
-   // statement
+   // deferred until after the bind checks succeed, so a failed call never
+   // leaves a cache entry pointing at an already-finalized statement
    if (isNewlyCreatedStatement && cacheThis) {
       setCachedStatement(cachedStmt, sql);
    }
@@ -920,13 +975,12 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    // other error
    rc = ::sqlite3_step(pStmt);
 
-   if (SQLITE_DONE != rc && SQLITE_ROW != rc) {
-      reportStepError("executeUpdate", rc, sql);
+   if (SQLITE_DONE != rc) {
+      // recorded before the statement is reset or finalized below. (A
+      // statement without result columns, which is all that gets here, cannot
+      // return a row; if SQLite ever did, it would fail like any other.)
+      stepFailed("executeUpdate", rc, sql);
    }
-
-   // (a statement without result columns, which is all that gets here, cannot
-   // return a row; if SQLite ever did, rc would not be SQLITE_DONE and the call
-   // fails like any other)
 
    if (cachedStmt) {
       ::sqlite3_reset(pStmt);
@@ -948,6 +1002,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
    bool sqlSuccess = (rc == SQLITE_DONE);
 
    if (sqlSuccess) {
+      // the result of this call is its own: whatever a re-entrant call made
+      // from inside it (an SQL function that used this database) recorded
+      // meanwhile does not stay. (executeQuery() runs no SQL, so no function
+      // of the caller's can run inside it.)
+      clearLastError();
       affectedRowsCount = ::sqlite3_changes(m_db);
    } else {
       affectedRowsCount = 0L;

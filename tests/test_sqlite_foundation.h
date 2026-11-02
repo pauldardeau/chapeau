@@ -4,6 +4,7 @@
 #include <string>
 
 #include "TestSuite.h"
+#include "Database.h"
 
 namespace chapeau {
 class SQLiteResultSet;
@@ -98,10 +99,21 @@ protected:
    void test_float_binding_is_exact_promotion();
    void test_legacy_result_set_subclass_still_works();
    void test_execute_update_refuses_row_returning_statements();
+   void test_bind_failure_fails_the_call();
+   void test_argument_count_mismatch_is_reported();
+   void test_errors_that_are_not_sqlite_errors();
+   void test_last_error_lifetime();
+   void test_open_failure_is_recorded();
+   void test_cursor_error_message();
 
    void requireLongEquals(long long expected,
                           long long actual,
                           const std::string& description);
+   void requireLastError(chapeau::Database& db,
+                         chapeau::DBErrorKind kind,
+                         int code,
+                         const std::string& messagePart,
+                         const std::string& label);
    void requireDoubleEquals(double expected,
                             double actual,
                             const std::string& description);

@@ -33,12 +33,12 @@ public:
 
    /**
     * Opens the database file. Fails (returns false) if this object already has
-    * an open connection, and then changes nothing: the connection, its result
-    * sets, its transaction and its cached statements stay as they are. It
-    * also fails if the file cannot be opened, and then no connection is left
-    * behind, the reason is available from lastErrorCode() and
-    * lastErrorMessage(), and open() may be tried again (for instance once the
-    * missing directory exists).
+    * an open connection (DBErrorKind::AlreadyOpen), and then changes nothing:
+    * the connection, its result sets, its transaction and its cached
+    * statements stay as they are. It also fails if the file cannot be opened
+    * (DBErrorKind::Sqlite), and then no connection is left behind, the reason
+    * is available from lastErrorCode() and lastErrorMessage(), and open() may
+    * be tried again (for instance once the missing directory exists).
     */
    bool open();
 
@@ -50,6 +50,12 @@ public:
    void close();
    bool goodConnection();
 
+   // The bind functions return false when the value could not be bound (SQLite
+   // refused it, or there is no statement), and then record DBErrorKind::BindFailed
+   // with SQLite's code and message as the last error (code 0 if SQLite was not
+   // involved). They do not log, and a success does not clear the error: they are
+   // the steps of executeQuery() and executeUpdate(), which check every one of
+   // them, do not run the statement when one fails, and report which parameter.
    bool bindData(const DBData* data, int idx, DBStatement* statement);
    bool bindDate(const DBDate* value, int idx, DBStatement* statement);
    bool bindBool(bool value, int idx, DBStatement* statement);
@@ -65,10 +71,19 @@ public:
 
    const std::string& databasePath() const;
 
-   std::string lastErrorMessage();
+   // The last error (lastErrorKind(), lastErrorCode() and lastErrorMessage())
+   // is Database's snapshot, see there. Here, a failure of SQLite itself
+   // (prepare, step, open, close, a failed bind) carries SQLite's result code and
+   // sqlite3_errmsg() text as they were when it happened; the failures that are
+   // not SQLite's (a wrong number of arguments, no connection, open() twice, a
+   // refused statement, re-entrant use) have code 0.
 
-   int lastErrorCode();
-   bool hadError();
+   /**
+    * @return true if the last operation failed, that is lastErrorKind() is not
+    * DBErrorKind::None
+    */
+   bool hadError() const;
+
    long long int lastInsertRowId();
 
    sqlite3* sqliteHandle();
@@ -155,17 +170,57 @@ protected:
 private:
    friend class SQLiteResultSet;
 
-   // says on stdout what sqlite3_step() returned in 'where', with SQLite's own
-   // message; a busy database is reported as such
-   void reportStepError(const char* where, int rc, const std::string& sql);
+   // Every failure of an operation goes through here: it is recorded as the
+   // last error (see Database::lastErrorKind()) and, if setLogsErrors() is on,
+   // written to stdout as one line with the kind, the code (where there is
+   // one) and the message. 'operation' names the public call and 'detail' is
+   // what it was given (the SQL), for the line only. Logging is the only thing
+   // that setLogsErrors() changes; what is recorded and returned never depends
+   // on it.
+   void fail(DBErrorKind kind,
+             int code,
+             const std::string& message,
+             const char* operation,
+             const std::string& detail = std::string());
+
+   // A failed sqlite3_step() (rc) in 'operation': records and logs it with
+   // SQLite's message as it is now -- before the statement is reset or
+   // finalized -- and returns that message, which a result set keeps.
+   std::string stepFailed(const char* operation, int rc, const std::string& sql);
+
+   // The number of arguments is not the number of the statement's parameters.
+   // Nothing has been bound when this is called.
+   void bindCountFailed(const char* operation,
+                        const std::string& sql,
+                        size_t parameterCount,
+                        size_t argumentCount);
+
+   // Binds each argument of args, in order, to statement. Stops at the first
+   // one that cannot be bound and records it as DBErrorKind::BindFailed, with
+   // SQLite's code and message if SQLite refused it; nothing has then been
+   // executed. The caller releases the statement.
+   bool bindArguments(const char* operation,
+                      const std::string& sql,
+                      const DBStatementArgs& args,
+                      SQLiteStatement* statement);
+
+   // The result of a sqlite3_bind_*() call: true for SQLITE_OK. Otherwise the
+   // failure is recorded as BindFailed (not logged here: it is part of an
+   // operation, whose own report names the parameter) and false is returned.
+   bool bindResult(int rc);
+
+   // The bind functions were not given a statement to bind to
+   bool noStatementToBind();
 
    // prepares sql (sqlite3_prepare_v2) into *ppStmt; on failure *ppStmt is null
-   // and the reason is reported. A prepare that has to read the schema waits
+   // and the reason is recorded. A prepare that has to read the schema waits
    // for a lock for as long as the busy timeout allows.
-   bool prepareStatement(const std::string& sql, sqlite3_stmt** ppStmt);
+   bool prepareStatement(const std::string& sql,
+                         sqlite3_stmt** ppStmt,
+                         const char* operation);
 
    // executeUpdate() runs statements that do not return rows. Returns true, after
-   // reporting it, if pStmt has result columns and so must not be run; the
+   // recording it, if pStmt has result columns and so must not be run; the
    // statement is finalized unless the cache owns it.
    bool refuseRowReturningUpdate(sqlite3_stmt* pStmt,
                                  const std::string& sql,
@@ -229,11 +284,6 @@ private:
    bool        m_traceExecution;
    bool        m_checkedOut;
    int         m_busyRetryTimeout;
-
-   // why the last open() failed, for lastErrorCode() and lastErrorMessage()
-   // while there is no connection to ask; SQLITE_OK if it did not
-   int         m_openErrorCode;
-   std::string m_openErrorMessage;
 
    SQLiteDatabase();
    SQLiteDatabase(const SQLiteDatabase&);

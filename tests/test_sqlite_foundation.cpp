@@ -140,6 +140,12 @@ void TestSQLiteFoundation::runTests() {
    test_float_binding_is_exact_promotion();
    test_legacy_result_set_subclass_still_works();
    test_execute_update_refuses_row_returning_statements();
+   test_bind_failure_fails_the_call();
+   test_argument_count_mismatch_is_reported();
+   test_errors_that_are_not_sqlite_errors();
+   test_last_error_lifetime();
+   test_open_failure_is_recorded();
+   test_cursor_error_message();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -3432,7 +3438,6 @@ void TestSQLiteFoundation::test_execute_update_refuses_row_returning_statements(
 
       for (const Refused& r : refused) {
          const string label = when + ", " + r.label;
-         const int errorBefore = db.lastErrorCode();
          const vector<string> statementsBefore = openStatementSql(db);
          unsigned long rowsAffected = 99;
 
@@ -3447,7 +3452,7 @@ void TestSQLiteFoundation::test_execute_update_refuses_row_returning_statements(
 
          require(!result, label + ": refused (returns false)");
          requireLongEquals(0, rowsAffected, label + ": no rows affected");
-         requireLongEquals(errorBefore, db.lastErrorCode(), label + ": the connection's error state is untouched");
+         requireLastError(db, DBErrorKind::RefusedStatement, 0, "returns rows", label + ": the refusal is recorded, as its own kind");
          require(!db.inTransaction(), label + ": no transaction was started");
          require(openStatementSql(db) == statementsBefore,
                  label + ": no statement was left behind or taken away: " + describe(openStatementSql(db)));
@@ -3532,4 +3537,821 @@ void TestSQLiteFoundation::test_execute_update_refuses_row_returning_statements(
                         "and the committed row is there");
    }
    db.close();
+}
+
+// ---- reliable error reporting (CH-20) ---------------------------------------
+
+namespace {
+
+// While this is alive the connection refuses to bind or return a text or blob
+// longer than 10 bytes (SQLITE_TOOBIG): a bind that fails for the caller's data
+// although the statement and the number of arguments are right.
+class ShortValueLimit {
+public:
+   explicit ShortValueLimit(SQLiteDatabase& db) :
+      m_handle(db.sqliteHandle()),
+      m_previous(sqlite3_limit(db.sqliteHandle(), SQLITE_LIMIT_LENGTH, 10)) {
+   }
+   ~ShortValueLimit() {
+      sqlite3_limit(m_handle, SQLITE_LIMIT_LENGTH, m_previous);
+   }
+private:
+   sqlite3* m_handle;
+   int m_previous;
+};
+
+// the SQL of the open statement whose text is 'sql', with its bound values
+// filled in (SQLite's own view of what it holds), or "" if there is none
+string expandedSqlOfStatement(SQLiteDatabase& db, const string& sql) {
+   for (sqlite3_stmt* s = sqlite3_next_stmt(db.sqliteHandle(), nullptr);
+        s != nullptr;
+        s = sqlite3_next_stmt(db.sqliteHandle(), s)) {
+      const char* text = sqlite3_sql(s);
+      if (text != nullptr && sql == text) {
+         char* expanded = sqlite3_expanded_sql(s);
+         const string result = (expanded != nullptr) ? expanded : "";
+         sqlite3_free(expanded);
+         return result;
+      }
+   }
+   return string();
+}
+
+const char* const TOO_LONG_FOR_LIMIT = "xxxxxxxxxxxxxxxxxxxx";   // 20 bytes
+
+}
+
+void TestSQLiteFoundation::requireLastError(Database& db,
+                                            DBErrorKind kind,
+                                            int code,
+                                            const string& messagePart,
+                                            const string& label) {
+   require(db.lastErrorKind() == kind,
+           label + ": kind is " + dbErrorKindName(kind) + " (got " +
+           dbErrorKindName(db.lastErrorKind()) + ", message '" + db.lastErrorMessage() + "')");
+   requireLongEquals(code, db.lastErrorCode(), label + ": code");
+
+   const string message = db.lastErrorMessage();
+   if (kind == DBErrorKind::None) {
+      require(message.empty(), label + ": no message (got '" + message + "')");
+   } else {
+      require(!message.empty(), label + ": a message");
+      require(message.find(messagePart) != string::npos,
+              label + ": the message mentions '" + messagePart + "' (got '" + message + "')");
+   }
+}
+
+void TestSQLiteFoundation::test_bind_failure_fails_the_call() {
+   TEST_CASE("test_bind_failure_fails_the_call");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("bind_failure.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table n(id integer primary key, v text, w text)"), "create a table with nullable columns");
+   require(exec(db, "create table nn(id integer primary key, v text not null)"), "create a table with a NOT NULL column");
+   db.clearCachedStatements();
+
+   const string tooLong = TOO_LONG_FOR_LIMIT;
+   const string insertN = "insert into n(id,v,w) values (?,?,?)";
+   const string insertNN = "insert into nn(id,v) values (?,?)";
+   const string selectParam = "select ? is null, ?";
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      db.clearCachedStatements();
+      require(exec(db, "delete from n"), when + ": start empty");
+      require(exec(db, "delete from nn"), when + ": start empty (NOT NULL table)");
+      db.clearCachedStatements();
+
+      // the first run of a statement fails to bind: nothing is left behind, the
+      // statement was only prepared for this call
+      {
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBLong(1));
+         args.add(new DBString(tooLong));
+         args.add(new DBString("fine"));
+         bool ok = true;
+         {
+            ShortValueLimit limit(db);
+            ok = db.executeUpdate(insertN, args, rows);
+         }
+         require(!ok, when + ": a bind failure fails executeUpdate (it used to store NULL and succeed)");
+         requireLongEquals(0, rows, when + ": no rows affected");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 2", when + ": executeUpdate");
+         requireLongEquals(0, countFromNewConnection(path, "n"),
+                           when + ": nothing was stored -- not even a row with a NULL in the nullable column");
+         require(openStatementSql(db).empty(),
+                 when + ": no statement was left behind: " + describe(openStatementSql(db)));
+      }
+
+      // a NOT NULL column: the real reason is reported, not the constraint a
+      // NULL in its place would have hit
+      {
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBLong(1));
+         args.add(new DBString(tooLong));
+         bool ok = true;
+         {
+            ShortValueLimit limit(db);
+            ok = db.executeUpdate(insertNN, args, rows);
+         }
+         require(!ok, when + ": NOT NULL column: fails");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "too big", when + ": NOT NULL column");
+         require(db.lastErrorCode() != SQLITE_CONSTRAINT,
+                 when + ": and it is the bind error, not a constraint error");
+         requireLongEquals(0, countFromNewConnection(path, "nn"), when + ": nothing was stored");
+      }
+
+      // a failing first parameter names parameter 1
+      {
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBString(tooLong));
+         args.add(new DBString("a"));
+         args.add(new DBString("b"));
+         bool ok = true;
+         {
+            ShortValueLimit limit(db);
+            ok = db.executeUpdate(insertN, args, rows);
+         }
+         require(!ok, when + ": the first argument cannot be bound");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 1", when + ": first argument");
+      }
+
+      // a blob that cannot be bound
+      {
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBLong(1));
+         const string bytes = tooLong;
+         args.add(new DBData(bytes.data(), bytes.size()));
+         args.add(new DBNull("string"));
+         bool ok = true;
+         {
+            ShortValueLimit limit(db);
+            ok = db.executeUpdate(insertN, args, rows);
+         }
+         require(!ok, when + ": a blob that cannot be bound fails");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 2", when + ": blob");
+      }
+
+      // a query: no result set, and nothing run
+      {
+         DBStatementArgs args;
+         args.add(new DBString(tooLong));
+         args.add(new DBLong(7));
+         unique_ptr<DBResultSet> rs;
+         {
+            ShortValueLimit limit(db);
+            rs.reset(db.executeQuery(selectParam, args));
+         }
+         require(rs == nullptr, when + ": executeQuery returns no result set (it used to run with a NULL)");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 1", when + ": executeQuery");
+         require(openStatementSql(db).empty(),
+                 when + ": no statement was left behind by executeQuery: " + describe(openStatementSql(db)));
+      }
+
+      // the same statements run fine afterwards, with real values, and the
+      // error is gone
+      {
+         unsigned long rows = 0;
+         DBStatementArgs args;
+         args.add(new DBLong(1));
+         args.add(new DBString("good"));
+         args.add(new DBString("also"));
+         require(db.executeUpdate(insertN, args, rows), when + ": a valid insert works afterwards");
+         requireLongEquals(1, rows, when + ": one row");
+         requireLastError(db, DBErrorKind::None, 0, "", when + ": and the error is cleared");
+         requireStringEquals("good|also", rawFirstRow(path, "select v, w from n where id = 1"),
+                             when + ": the values that were stored");
+         const vector<string> expected = (pass == 0) ? vector<string>{insertN} : vector<string>{};
+         require(openStatementSql(db) == expected,
+                 when + ": the statement is cached exactly when caching is on: " + describe(openStatementSql(db)));
+      }
+
+      // a failure on a statement that is reused (cached): the statement stays,
+      // is idle, holds none of the values bound before the failure, and works
+      {
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBLong(2));
+         args.add(new DBString(tooLong));
+         args.add(new DBString("late"));
+         bool ok = true;
+         {
+            ShortValueLimit limit(db);
+            ok = db.executeUpdate(insertN, args, rows);
+         }
+         require(!ok, when + ": the same statement fails to bind");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 2", when + ": reused statement");
+         requireLongEquals(1, countFromNewConnection(path, "n"), when + ": still only the good row");
+
+         if (pass == 0) {
+            require(openStatementSql(db) == vector<string>{insertN},
+                    when + ": the cached statement is still the one open statement");
+            requireStringEquals("insert into n(id,v,w) values (NULL,NULL,NULL)",
+                                expandedSqlOfStatement(db, insertN),
+                                when + ": and the values bound before the failure were cleared");
+         }
+
+         DBStatementArgs again;
+         again.add(new DBLong(2));
+         again.add(new DBString("second"));
+         again.add(new DBString("row"));
+         require(db.executeUpdate(insertN, again, rows), when + ": it still executes afterwards");
+         requireStringEquals("second|row", rawFirstRow(path, "select v, w from n where id = 2"),
+                             when + ": with the new values");
+      }
+
+      // the same for a query: a statement that is reused keeps none of the
+      // values bound before the failure
+      {
+         {
+            DBStatementArgs real;
+            real.add(new DBString("a"));
+            real.add(new DBLong(7));
+            unique_ptr<DBResultSet> rs(db.executeQuery(selectParam, real));
+            require(rs && rs->next(), when + ": the query works with real values");
+            requireLongEquals(7, rs ? rs->intForColumnIndex(1) : -1, when + ": and returns them");
+         }
+         DBStatementArgs bad;
+         bad.add(new DBString("b"));
+         bad.add(new DBString(tooLong));
+         unique_ptr<DBResultSet> none;
+         {
+            ShortValueLimit limit(db);
+            none.reset(db.executeQuery(selectParam, bad));
+         }
+         require(none == nullptr, when + ": the reused query fails to bind");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 2", when + ": reused query");
+         if (pass == 0) {
+            requireStringEquals("select NULL is null, NULL", expandedSqlOfStatement(db, selectParam),
+                                when + ": and it holds none of the values bound before the failure");
+         } else {
+            require(openStatementSql(db).empty(), when + ": (uncached) no statement is left behind");
+         }
+      }
+
+      // an active result set is not disturbed by a failed bind, including a
+      // failed query over the very SQL it is running
+      {
+         const string listSql = "select id from n order by id";
+         unique_ptr<SQLiteResultSet> cursor(openCursor(db, listSql));
+         require(cursor && cursor->next(), when + ": an active result set on its first row");
+         requireLongEquals(1, cursor ? cursor->intForColumnIndex(0) : -1, when + ": row 1");
+
+         unsigned long rows = 99;
+         DBStatementArgs args;
+         args.add(new DBLong(3));
+         args.add(new DBString(tooLong));
+         args.add(new DBString("x"));
+         {
+            ShortValueLimit limit(db);
+            require(!db.executeUpdate(insertN, args, rows), when + ": a failed bind with a cursor open");
+            DBStatementArgs q;
+            q.add(new DBString(tooLong));
+            q.add(new DBLong(0));
+            unique_ptr<DBResultSet> none(db.executeQuery(selectParam, q));
+            require(none == nullptr, when + ": and a failed query");
+         }
+         if (cursor) {
+            require(cursor->next(), when + ": the cursor carries on");
+            requireLongEquals(2, cursor->intForColumnIndex(0), when + ": with its second row");
+            require(!cursor->next(), when + ": to its end");
+            require(cursor->status() == DBResultSetStatus::Done, when + ": normally");
+         }
+      }
+   }
+   db.setShouldCacheStatements(true);
+   db.close();
+}
+
+void TestSQLiteFoundation::test_argument_count_mismatch_is_reported() {
+   TEST_CASE("test_argument_count_mismatch_is_reported");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("arg_counts.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table p(id integer primary key, v text)"), "create table");
+
+   const string insertSql = "insert into p(id,v) values (?,?)";
+   const string selectSql = "select id, v from p where id = ? and v = ?";
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      db.clearCachedStatements();
+      require(exec(db, "delete from p"), when + ": start empty");
+      db.clearCachedStatements();
+
+      // run once with the right arguments so that, with caching on, the statements are cached
+      // for the failing calls below (the first round tests a statement prepared for the call)
+      for (int round = 0; round < 2; ++round) {
+         const string label = when + ", " + (round == 0 ? "new statement" : "cached statement");
+         const vector<string> before = openStatementSql(db);
+         unsigned long rows = 99;
+
+         {
+            DBStatementArgs few;
+            few.add(new DBLong(1));
+            require(!db.executeUpdate(insertSql, few, rows), label + ": too few arguments fail");
+            requireLongEquals(0, rows, label + ": nothing affected");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 1 argument(s)", label + ": too few");
+         }
+         {
+            DBStatementArgs many;
+            many.add(new DBLong(1));
+            many.add(new DBString("a"));
+            many.add(new DBLong(9));
+            rows = 99;
+            require(!db.executeUpdate(insertSql, many, rows), label + ": too many arguments fail");
+            requireLongEquals(0, rows, label + ": nothing affected");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 3 argument(s)", label + ": too many");
+            require(db.lastErrorCode() != SQLITE_RANGE,
+                    label + ": SQLite was never asked to bind the surplus argument (it used to answer RANGE)");
+         }
+         {
+            rows = 99;
+            require(!db.executeUpdate(insertSql, rows), label + ": parameters but no arguments: executeUpdate(sql)");
+            requireLongEquals(0, rows, label + ": nothing affected");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 0 argument(s)", label + ": no arguments");
+         }
+         {
+            unique_ptr<DBResultSet> none(db.executeQuery(selectSql));
+            require(none == nullptr, label + ": parameters but no arguments: executeQuery(sql)");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 0 argument(s)", label + ": query, no arguments");
+
+            DBStatementArgs one;
+            one.add(new DBLong(1));
+            unique_ptr<DBResultSet> fewer(db.executeQuery(selectSql, one));
+            require(fewer == nullptr, label + ": executeQuery with too few arguments");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 1 argument(s)", label + ": query, too few");
+
+            DBStatementArgs three;
+            three.add(new DBLong(1));
+            three.add(new DBString("a"));
+            three.add(new DBLong(2));
+            unique_ptr<DBResultSet> more(db.executeQuery(selectSql, three));
+            require(more == nullptr, label + ": executeQuery with too many arguments");
+            requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 3 argument(s)", label + ": query, too many");
+         }
+         {
+            DBStatementArgs none;
+            rows = 99;
+            require(!db.executeUpdate("select 1", none, rows), label + ": (a refused statement is not a count error)");
+            requireLastError(db, DBErrorKind::RefusedStatement, 0, "returns rows", label + ": refused");
+            DBStatementArgs three;
+            three.add(new DBLong(1));
+            rows = 99;
+            require(!db.executeUpdate("create table nope(a)", three, rows), label + ": arguments for a statement without parameters");
+            requireLastError(db, DBErrorKind::BindCount, 0, "0 parameter(s) but 1 argument(s)", label + ": surplus for none");
+         }
+
+         require(openStatementSql(db) == before,
+                 label + ": no statement was left behind or taken away: " + describe(openStatementSql(db)));
+         requireLongEquals(round, countFromNewConnection(path, "p"),
+                           label + ": nothing was stored by the failed calls (only the earlier round's row)");
+         requireLongEquals(0, countFromNewConnection(path, "sqlite_master where name = 'nope'"),
+                           label + ": and the statement with surplus arguments was not run");
+
+         // the statement is fine afterwards
+         DBStatementArgs good;
+         good.add(new DBLong(10 + round));
+         good.add(new DBString("ok"));
+         rows = 0;
+         require(db.executeUpdate(insertSql, good, rows), label + ": a correct call works afterwards");
+         requireLongEquals(1, rows, label + ": one row");
+         requireLastError(db, DBErrorKind::None, 0, "", label + ": and the error is cleared");
+         DBStatementArgs q;
+         q.add(new DBLong(10 + round));
+         q.add(new DBString("ok"));
+         unique_ptr<DBResultSet> rs(db.executeQuery(selectSql, q));
+         require(rs && rs->next(), label + ": and so does a query");
+      }
+   }
+   db.setShouldCacheStatements(true);
+   db.close();
+}
+
+namespace {
+
+// an SQL function that uses the database it runs in: while the outer call is
+// running, that is a re-entrant use
+struct Reentry {
+   SQLiteDatabase* db;
+   bool calledNested;
+   bool nestedResult;
+   DBErrorKind nestedKind;
+   int nestedCode;
+   DBErrorKind kindOnEntry;   // the database's error when the function started
+};
+
+Reentry g_reentry;
+
+void reentrantFunction(sqlite3_context* context, int, sqlite3_value**) {
+   unsigned long rows = 99;
+   if (!g_reentry.calledNested) {
+      // the first row only: the later ones see what the first one's nested call recorded
+      g_reentry.kindOnEntry = g_reentry.db->lastErrorKind();
+   }
+   g_reentry.calledNested = true;
+   g_reentry.nestedResult = g_reentry.db->executeUpdate("update u set a = a", rows);
+   g_reentry.nestedKind = g_reentry.db->lastErrorKind();
+   g_reentry.nestedCode = g_reentry.db->lastErrorCode();
+   sqlite3_result_int(context, 1);
+}
+
+
+// an argument whose bind fails without SQLite being involved
+class UnbindableArgument : public DBAbstractDataType {
+public:
+   UnbindableArgument() : DBAbstractDataType("unbindable") {}
+   string valueAsString() const override { return "unbindable"; }
+   bool bind(Database*, int, DBStatement*) const override { return false; }
+};
+
+}
+
+void TestSQLiteFoundation::test_errors_that_are_not_sqlite_errors() {
+   TEST_CASE("test_errors_that_are_not_sqlite_errors");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("not_sqlite.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+
+   // a fresh database has no error
+   requireLastError(db, DBErrorKind::None, 0, "", "a new database");
+   require(!db.hadError(), "hadError() is false");
+
+   // no connection, never opened: every operation says so, and none crashes
+   {
+      unsigned long rows = 99;
+      DBStatementArgs args;
+      args.add(new DBLong(1));
+      const char* const noConnection = "no database connection";
+
+      require(!db.executeUpdate("create table z(a)", rows), "executeUpdate(sql) without a connection");
+      requireLongEquals(0, rows, "with no rows affected");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "executeUpdate(sql)");
+
+      rows = 99;
+      require(!db.executeUpdate("insert into z values (?)", args, rows), "executeUpdate(sql, args) without a connection");
+      requireLongEquals(0, rows, "with no rows affected");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "executeUpdate(sql, args)");
+
+      require(db.executeQuery("select 1") == nullptr, "executeQuery(sql) without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "executeQuery(sql)");
+
+      require(db.executeQuery("select ?", args) == nullptr, "executeQuery(sql, args) without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "executeQuery(sql, args)");
+
+      require(!db.goodConnection(), "goodConnection() without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "goodConnection()");
+
+      require(!db.beginTransaction(), "beginTransaction() without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "beginTransaction()");
+      require(!db.commit(), "commit() without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "commit()");
+      require(!db.rollback(), "rollback() without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "rollback()");
+
+      requireLongEquals(-1, db.lastInsertRowId(), "lastInsertRowId() without a connection");
+      requireLastError(db, DBErrorKind::NoConnection, 0, noConnection, "lastInsertRowId()");
+      require(db.hadError(), "hadError() is true");
+   }
+
+   // open() clears the error, and a second open() is its own failure
+   require(db.open(), "open");
+   requireLastError(db, DBErrorKind::None, 0, "", "after a successful open");
+   sqlite3* const handle = db.sqliteHandle();
+   require(exec(db, "create table u(a integer)"), "create a table");
+   require(exec(db, "insert into u(a) values (1)"), "and a row");
+   require(!db.open(), "open() on an open database");
+   requireLastError(db, DBErrorKind::AlreadyOpen, 0, "already open", "second open()");
+   require(db.sqliteHandle() == handle, "the connection is unchanged");
+   require(db.hadError(), "hadError() is true even though no SQLite code is involved");
+   require(exec(db, "insert into u(a) values (2)"), "and the connection works");
+   requireLastError(db, DBErrorKind::None, 0, "", "a later success clears it");
+
+   // a refused statement
+   {
+      unsigned long rows = 99;
+      require(!db.executeUpdate("select a from u", rows), "a SELECT through executeUpdate");
+      requireLastError(db, DBErrorKind::RefusedStatement, 0, "returns rows", "executeUpdate(select)");
+      DBStatementArgs args;
+      rows = 99;
+      require(!db.executeUpdate("insert into u(a) values (50) returning a", args, rows), "INSERT ... RETURNING through executeUpdate");
+      requireLastError(db, DBErrorKind::RefusedStatement, 0, "executeQuery", "executeUpdate(returning)");
+      requireLongEquals(2, scalar(db, "select count(*) from u"), "and it was not run");
+   }
+
+   // re-entrant use from an SQL function
+   {
+      g_reentry = Reentry{&db, false, true, DBErrorKind::None, -1, DBErrorKind::RefusedStatement};
+      require(sqlite3_create_function(db.sqliteHandle(), "reenter", 0, SQLITE_UTF8, nullptr,
+                                      reentrantFunction, nullptr, nullptr) == SQLITE_OK,
+              "register a function that uses the database");
+      unsigned long rows = 0;
+      require(db.executeUpdate("update u set a = a + reenter()", rows), "an update that calls it succeeds");
+      require(g_reentry.calledNested, "the function ran");
+      require(!g_reentry.nestedResult, "its use of the database was refused");
+      require(g_reentry.nestedKind == DBErrorKind::InUse, "as InUse");
+      requireLongEquals(0, g_reentry.nestedCode, "with no SQLite code");
+      requireLastError(db, DBErrorKind::None, 0, "",
+                       "the outer call succeeded: what the nested call recorded does not stay");
+
+      // and when the outer call fails, its own error is the one that stays
+      g_reentry.calledNested = false;
+      require(exec(db, "create table k(id integer primary key)"), "create table k");
+      require(exec(db, "insert into k(id) values (1)"), "with a row");
+      require(!db.executeUpdate("insert into k(id) values (reenter())", rows), "an insert that calls it, and collides");
+      require(g_reentry.calledNested && g_reentry.nestedKind == DBErrorKind::InUse, "the nested call was refused again");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed", "the outer failure");
+   }
+
+   // an operation begins with no error: a function that runs inside it finds none
+   {
+      unsigned long rows = 0;
+      require(!exec(db, "insert intoo u values (1)"), "a failing call leaves an error");
+      g_reentry.kindOnEntry = DBErrorKind::RefusedStatement;
+      g_reentry.calledNested = false;
+      require(db.executeUpdate("update u set a = a + reenter()", rows), "executeUpdate(sql) with the function");
+      require(g_reentry.kindOnEntry == DBErrorKind::None, "executeUpdate(sql) starts with no error");
+
+      require(!exec(db, "insert intoo u values (1)"), "a failing call leaves an error again");
+      g_reentry.kindOnEntry = DBErrorKind::RefusedStatement;
+      g_reentry.calledNested = false;
+      DBStatementArgs zero;
+      zero.add(new DBLong(0));
+      require(db.executeUpdate("update u set a = a + reenter() where a > ?", zero, rows), "executeUpdate(sql, args) with the function");
+      require(g_reentry.kindOnEntry == DBErrorKind::None, "executeUpdate(sql, args) starts with no error");
+   }
+
+   // an argument that cannot be bound for a reason that is not SQLite's
+   {
+      unsigned long rows = 99;
+      DBStatementArgs args;
+      args.add(new UnbindableArgument());
+      require(!db.executeUpdate("insert into u(a) values (?)", args, rows), "an argument whose bind fails");
+      requireLongEquals(0, rows, "no rows affected");
+      requireLastError(db, DBErrorKind::BindFailed, 0, "parameter 1: the argument could not be bound", "executeUpdate");
+      unique_ptr<DBResultSet> none(db.executeQuery("select ?", args));
+      require(none == nullptr, "and a query over it");
+      requireLastError(db, DBErrorKind::BindFailed, 0, "parameter 1", "executeQuery");
+   }
+
+   // the bind functions: no statement, a parameter that does not exist, and a success that
+   // leaves the error alone
+   {
+      require(!db.bindInt(1, 1, nullptr), "bindInt() without a statement");
+      requireLastError(db, DBErrorKind::BindFailed, 0, "no statement", "bindInt(nullptr)");
+      require(!db.bindString("x", 1, nullptr), "bindString() without a statement");
+      requireLastError(db, DBErrorKind::BindFailed, 0, "no statement", "bindString(nullptr)");
+      require(!db.bindNull(1, nullptr), "bindNull() without a statement");
+      require(!db.bindBool(true, 1, nullptr), "bindBool() without a statement");
+      require(!db.bindLong(1L, 1, nullptr), "bindLong() without a statement");
+      require(!db.bindFloat(1.0f, 1, nullptr), "bindFloat() without a statement");
+      require(!db.bindDouble(1.0, 1, nullptr), "bindDouble() without a statement");
+      DBData blob("ab", 2);
+      require(!db.bindData(&blob, 1, nullptr), "bindData() without a statement");
+      requireLastError(db, DBErrorKind::BindFailed, 0, "no statement", "bindData(nullptr)");
+
+      sqlite3_stmt* raw = nullptr;
+      require(sqlite3_prepare_v2(db.sqliteHandle(), "select ?", -1, &raw, nullptr) == SQLITE_OK, "a statement of our own");
+      SQLiteStatement own(raw, false);
+      require(!db.bindInt(1, 5, &own), "bindInt() to a parameter that does not exist");
+      requireLastError(db, DBErrorKind::BindFailed, SQLITE_RANGE, "out of range", "bindInt(5)");
+      require(db.bindInt(1, 1, &own), "bindInt() to parameter 1");
+      requireLastError(db, DBErrorKind::BindFailed, SQLITE_RANGE, "out of range", "a successful bind does not clear the error");
+   }
+
+   // close() is an operation: it clears the error, and afterwards there is no connection
+   require(!exec(db, "create table u(a integer)"), "a failing call");
+   require(db.hadError(), "which leaves an error");
+   db.close();
+   requireLastError(db, DBErrorKind::None, 0, "", "close() clears the error");
+   require(!exec(db, "select 1"), "no connection after close()");
+   requireLastError(db, DBErrorKind::NoConnection, 0, "no database connection", "after close()");
+}
+
+void TestSQLiteFoundation::test_last_error_lifetime() {
+   TEST_CASE("test_last_error_lifetime");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("error_lifetime.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItems(db), "create and fill the items table");
+
+   // a constraint failure
+   unsigned long rows = 0;
+   require(!db.executeUpdate("insert into items(id,name) values (1,'again')", rows), "a duplicate key");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed: items.id", "constraint error");
+   const string message = db.lastErrorMessage();
+
+   // reading it does not clear it, however often, and neither do the other accessors
+   for (int i = 0; i < 3; ++i) {
+      require(db.lastErrorKind() == DBErrorKind::Sqlite && db.lastErrorCode() == SQLITE_CONSTRAINT &&
+              db.lastErrorMessage() == message && db.hadError(), "reading the error leaves it (" + to_string(i) + ")");
+   }
+   (void) db.inTransaction();
+   (void) db.databasePath();
+   (void) db.busyRetryTimeout();
+   (void) db.shouldCacheStatements();
+   require(db.lastErrorKind() == DBErrorKind::Sqlite, "state queries leave it");
+
+   // nothing the library does inside leaves it either: statements released,
+   // bindings cleared, the cache emptied and resized
+   {
+      unique_ptr<SQLiteResultSet> held(openCursor(db, "select id from items"));
+      require(held && held->next(), "a cursor");
+      requireLastError(db, DBErrorKind::None, 0, "", "opening a cursor is an operation: it cleared the error");
+      require(!db.executeUpdate("insert into items(id,name) values (1,'again')", rows), "fail again, with a cursor open");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "failure with a cursor open");
+      held->close();
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "closing the cursor (statement released)");
+      held.reset();
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "destroying the cursor");
+   }
+   db.clearCachedStatements();
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "clearing the statement cache");
+   db.setStatementCacheLimit(1);
+   db.setStatementCacheLimit(Database::DEFAULT_STATEMENT_CACHE_LIMIT);
+   db.setShouldCacheStatements(false);
+   db.setShouldCacheStatements(true);
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "resizing and switching the cache off and on");
+
+   // the same through an update with arguments, cached and uncached: the
+   // statement is reset and its bindings cleared (or deleted) after the failure
+   for (int pass = 0; pass < 2; ++pass) {
+      db.setShouldCacheStatements(pass == 0);
+      db.clearCachedStatements();
+      DBStatementArgs args;
+      args.add(new DBLong(2));
+      args.add(new DBString("dup"));
+      require(!db.executeUpdate("insert into items(id,name) values (?,?)", args, rows), "duplicate key with arguments");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed: items.id",
+                       string(pass == 0 ? "cached" : "uncached") + " statement released after the failure");
+   }
+   db.setShouldCacheStatements(true);
+
+   // a later success clears it ...
+   require(exec(db, "update items set qty = qty + 1 where id = 1"), "a successful update");
+   requireLastError(db, DBErrorKind::None, 0, "", "cleared by a successful update");
+   require(!db.hadError(), "hadError() is false");
+   require(exec(db, "update items set qty = qty - 1 where id = 1"), "undo");
+
+   // ... and a later failure replaces it
+   require(!exec(db, "insert intoo items values (1)"), "a syntax error");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "syntax error", "syntax error");
+   DBStatementArgs wrong;
+   wrong.add(new DBLong(1));
+   require(!db.executeUpdate("insert into items(id,name) values (?,?)", wrong, rows), "wrong argument count");
+   requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 1 argument(s)", "replaces the syntax error");
+   require(!exec(db, "select 1"), "a refused statement");
+   requireLastError(db, DBErrorKind::RefusedStatement, 0, "returns rows", "replaces the count error");
+
+   // a result set that fails in next() records the failure on the database too
+   {
+      unique_ptr<DBResultSet> cursor(db.executeQuery("insert into items(id,name) values (1,'again')"));
+      require(cursor != nullptr, "a statement given to executeQuery");
+      requireLastError(db, DBErrorKind::None, 0, "", "creating the result set succeeded");
+      require(cursor && !cursor->next(), "which fails when stepped");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed", "the failed step");
+      cursor.reset();
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "destroying the failed result set");
+   }
+   unique_ptr<DBResultSet> fine(db.executeQuery("select 1"));
+   requireLastError(db, DBErrorKind::None, 0, "", "cleared by a successful query");
+   fine.reset();
+   require(!exec(db, "select 1"), "a refused statement again");
+   require(db.hadError(), "which leaves an error");
+   {
+      DBStatementArgs byId;
+      byId.add(new DBLong(1));
+      unique_ptr<DBResultSet> withArguments(db.executeQuery("select name from items where id = ?", byId));
+      require(withArguments != nullptr, "a query with arguments");
+      requireLastError(db, DBErrorKind::None, 0, "", "cleared by a successful query with arguments");
+   }
+
+   // the transaction calls are built on executeUpdate: the failure of the call they make is theirs
+   require(db.beginTransaction(), "begin");
+   requireLastError(db, DBErrorKind::None, 0, "", "after begin");
+   require(!db.beginTransaction(), "a nested begin");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "within a transaction", "nested beginTransaction()");
+   require(!db.beginDeferredTransaction(), "a nested deferred begin");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "within a transaction", "nested beginDeferredTransaction()");
+   require(db.inTransaction(), "the transaction is still open");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "within a transaction", "asking inTransaction() does not clear it");
+   require(db.rollback(), "rollback");
+   requireLastError(db, DBErrorKind::None, 0, "", "after rollback");
+   require(!db.commit(), "commit without a transaction");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "no transaction is active", "commit()");
+   require(!db.rollback(), "rollback without a transaction");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "no transaction is active", "rollback()");
+
+   // close() clears it
+   db.close();
+   requireLastError(db, DBErrorKind::None, 0, "", "close()");
+}
+
+void TestSQLiteFoundation::test_open_failure_is_recorded() {
+   TEST_CASE("test_open_failure_is_recorded");
+   chapeau_tests::ScopedTempDir dir;
+   const fs::path missing = fs::path(dir.file("not_there"));
+   SQLiteDatabase db((missing / "x.sqlite3").string());
+   db.setLogsErrors(false);
+
+   for (int attempt = 0; attempt < 2; ++attempt) {
+      require(!db.open(), "open() fails: the directory does not exist");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CANTOPEN, "unable to open database file",
+                       "attempt " + to_string(attempt));
+   }
+   require(fs::create_directory(missing), "create the directory");
+   require(db.open(), "now it opens");
+   requireLastError(db, DBErrorKind::None, 0, "", "and the error is cleared");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_cursor_error_message() {
+   TEST_CASE("test_cursor_error_message");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("cursor_message.sqlite3");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      unique_ptr<SQLiteDatabase> db(new SQLiteDatabase(path));
+      db->setLogsErrors(false);
+      require(db->open(), when + ": open");
+      db->setShouldCacheStatements(pass == 0);
+      require(exec(*db, "drop table if exists items"), when + ": start clean");
+      require(createItems(*db), when + ": create and fill the items table");
+
+      // a result set that works has no message
+      {
+         unique_ptr<SQLiteResultSet> ok(openCursor(*db, "select id from items"));
+         require(ok && ok->lastErrorMessage().empty(), when + ": Ready: no message");
+         while (ok && ok->next()) {
+            require(ok->lastErrorMessage().empty(), when + ": Row: no message");
+         }
+         require(ok && ok->status() == DBResultSetStatus::Done && ok->lastErrorMessage().empty(),
+                 when + ": Done: no message");
+      }
+
+      unique_ptr<SQLiteResultSet> failed(openCursor(*db, "insert into items(id,name) values (1,'again')"));
+      require(failed != nullptr, when + ": a result set over a statement that will fail");
+      require(failed && failed->lastErrorMessage().empty(), when + ": no message before it is stepped");
+      require(failed && !failed->next(), when + ": next() fails");
+      require(failed && failed->status() == DBResultSetStatus::Error, when + ": status Error");
+      requireLongEquals(SQLITE_CONSTRAINT, failed ? (failed->lastErrorCode() & 0xff) : -1, when + ": the code");
+      const string expected = "UNIQUE constraint failed: items.id";
+      requireStringEquals(expected, failed ? failed->lastErrorMessage() : string("(none)"), when + ": SQLite's message");
+
+      // the statement was released when the step failed; the message is a copy
+      require(openStatementSql(*db).empty() || pass == 0,
+              when + ": (uncached) the statement is gone: " + describe(openStatementSql(*db)));
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after the statement was released");
+
+      require(!failed->next(), when + ": next() on the failed result set");
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after exhaustion following the error");
+      require(failed->status() == DBResultSetStatus::Error, when + ": still Error");
+
+      failed->close();
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after close()");
+      require(failed->status() == DBResultSetStatus::Error, when + ": close() does not turn it into Done");
+
+      // a different failure elsewhere does not touch it, nor does success
+      unsigned long rows = 0;
+      require(!db->executeUpdate("insert into items(id,name) values (2,'again')", rows), "another failure");
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after an unrelated failure");
+      require(exec(*db, "update items set qty = 1 where id = 3"), "a success");
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after an unrelated success");
+
+      unique_ptr<SQLiteResultSet> overflow(openCursor(*db, "select abs(-9223372036854775807 - 1)"));
+      require(overflow && !overflow->next(), when + ": a second result set fails differently");
+      requireLongEquals(SQLITE_ERROR, overflow ? overflow->lastErrorCode() : -1, when + ": its code");
+      require(overflow && overflow->lastErrorMessage().find("integer overflow") != string::npos,
+              when + ": its message is its own: " + (overflow ? overflow->lastErrorMessage() : string()));
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": and the first keeps its own");
+
+      // an active result set that is invalidated by close() has no error
+      unique_ptr<SQLiteResultSet> active(openCursor(*db, "select id from items"));
+      require(active && active->next(), when + ": an active result set");
+
+      // the database closes, then is destroyed
+      db->close();
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after the database was closed");
+      require(overflow->lastErrorMessage().find("integer overflow") != string::npos, when + ": (second) after close");
+      require(active->status() == DBResultSetStatus::Invalidated && active->lastErrorMessage().empty() &&
+              active->lastErrorCode() == 0, when + ": an invalidated result set has no error");
+      db.reset();
+      requireStringEquals(expected, failed->lastErrorMessage(), when + ": after the database was destroyed");
+      require(overflow->lastErrorMessage().find("integer overflow") != string::npos, when + ": (second) after destruction");
+      require(failed->status() == DBResultSetStatus::Error, when + ": still Error");
+   }
 }

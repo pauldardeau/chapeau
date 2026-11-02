@@ -53,6 +53,29 @@ enum class DBResultSetStatus {
 };
 
 /**
+ * What kind of failure Database::lastErrorKind() reports. Sqlite is a failure
+ * that SQLite itself reported, and then lastErrorCode() is SQLite's result
+ * code. The other kinds are failures that are Chapeau's own: no SQLite call
+ * failed, so lastErrorCode() is 0 for them -- except BindFailed, which carries
+ * SQLite's code when it was a sqlite3_bind_*() call that failed.
+ */
+enum class DBErrorKind {
+   None,             // the last operation succeeded
+   Sqlite,           // SQLite reported an error (prepare, step, open, close)
+   BindCount,        // the statement has a different number of parameters than the arguments given
+   BindFailed,       // an argument could not be bound to its parameter
+   NoConnection,     // there is no open connection
+   AlreadyOpen,      // open() on a database that is already open
+   InUse,            // the database was used while one of its operations was running
+   RefusedStatement  // executeUpdate() was given a statement that returns rows
+};
+
+/**
+ * @return the name of the kind, such as "BindFailed"
+ */
+const char* dbErrorKindName(DBErrorKind kind);
+
+/**
  *
  */
 class Database {
@@ -329,9 +352,13 @@ public:
     * overload above, which also says which statements are refused).
     * @param sql
     * @param args
+    * Each argument is bound in order. If the number of arguments is not the
+    * number of parameters (DBErrorKind::BindCount), or one cannot be bound
+    * (DBErrorKind::BindFailed), the statement is not run: it never runs with a
+    * parameter left unbound (NULL), and the call fails.
     * @param rowsAffectedCount the rows changed, or 0 when this returns false
     * @return true if the statement ran to completion; false if it failed or was
-    * refused (a refused statement is not run at all)
+    * refused (a refused statement is not run at all); lastErrorKind() says why
     * @see DBStatementArgs()
     */
    virtual bool executeUpdate(const std::string& sql,
@@ -339,18 +366,23 @@ public:
                               unsigned long& rowsAffectedCount) = 0;
 
    /**
-    *
+    * Prepares a query without parameters. The statement is not run until the
+    * result set is stepped (see DBResultSet::next()).
     * @param sql
-    * @return
+    * @return the result set, or nullptr if the statement could not be
+    * prepared; lastErrorKind() says why
     * @see DBResultSet()
     */
    virtual DBResultSet* executeQuery(const std::string& sql) = 0;
 
    /**
-    *
+    * Prepares a query with parameters. Each argument is bound in order; if the
+    * number of arguments is not the number of parameters (DBErrorKind::BindCount),
+    * or one cannot be bound (DBErrorKind::BindFailed), nothing is run and there
+    * is no result set: it is never run with a parameter left unbound (NULL).
     * @param sql
     * @param args
-    * @return
+    * @return the result set, or nullptr; lastErrorKind() says why
     * @see DBResultSet()
     */
    virtual DBResultSet* executeQuery(const std::string& sql,
@@ -432,7 +464,49 @@ public:
    */
    virtual bool goodConnection() = 0;
 
+   /**
+    * Why the last operation on this database failed. The error is a snapshot
+    * kept by the database, not read from the underlying library when asked:
+    *  - an operation that runs SQL or manages the connection (open, close,
+    *    goodConnection, executeQuery, executeUpdate and the transaction calls
+    *    built on it) starts by clearing the error;
+    *  - one that succeeds leaves it cleared: kind None, code 0, message empty;
+    *  - one that fails records its kind, code and message, which stay until the
+    *    next such operation replaces them. Reading them does not clear them,
+    *    and neither does anything the library does internally (releasing a
+    *    statement, clearing bindings, emptying the cache, a cursor ending);
+    *  - a result set that fails in next() also records its error here.
+    * The code is the database's own result code (for SQLite, the result of the
+    * failed call) where there is one, and 0 for a failure that did not come
+    * from the database. A subclass that does not keep track reports None.
+    * Not thread safe: a database is used by one thread at a time.
+    * @return the kind of the last failure
+    */
+   virtual DBErrorKind lastErrorKind() const;
+
+   /**
+    * @return the code of the last failure (see lastErrorKind()), 0 if none
+    */
+   virtual int lastErrorCode() const;
+
+   /**
+    * @return the message of the last failure (see lastErrorKind()), empty if
+    * there was none
+    */
+   virtual std::string lastErrorMessage() const;
+
 protected:
+   /**
+    * Records a failure as the last error (see lastErrorKind()), replacing the
+    * previous one. For subclasses.
+    */
+   void setLastError(DBErrorKind kind, int code, const std::string& message);
+
+   /**
+    * Clears the last error: None, code 0, empty message. For subclasses.
+    */
+   void clearLastError();
+
    /**
     * Called by clearCachedStatements() for each statement removed from the
     * cache. The default closes and deletes it; a subclass whose statements
@@ -458,6 +532,11 @@ private:
    std::list<std::string> m_cacheOrder;
    std::size_t m_statementCacheLimit;
    bool m_shouldCacheStatements;
+
+   // the last error (see lastErrorKind())
+   DBErrorKind m_lastErrorKind;
+   int m_lastErrorCode;
+   std::string m_lastErrorMessage;
 
 };
 
@@ -502,6 +581,16 @@ public:
     * otherwise 0
     */
    virtual int lastErrorCode() const;
+
+   /**
+    * The message of the error that ended this result set: the database's own
+    * explanation (for SQLite, sqlite3_errmsg() at the moment the step failed),
+    * when status() is DBResultSetStatus::Error, otherwise empty. Like the
+    * code, it is a snapshot that stays after the statement is released, the
+    * result set is exhausted or closed, and the database is closed.
+    * @return the error message, empty unless status() is Error
+    */
+   virtual std::string lastErrorMessage() const;
 
    /**
     * The column as an int. A SQLite INTEGER outside the range of int

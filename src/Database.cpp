@@ -20,7 +20,9 @@ using namespace chapeau;
 
 Database::Database() :
    m_statementCacheLimit(DEFAULT_STATEMENT_CACHE_LIMIT),
-   m_shouldCacheStatements(true) {
+   m_shouldCacheStatements(true),
+   m_lastErrorKind(DBErrorKind::None),
+   m_lastErrorCode(0) {
 }
 
 //******************************************************************************
@@ -266,6 +268,58 @@ void Database::discardCachedStatement(DBStatement* statement) {
 }
 
 //******************************************************************************
+
+DBErrorKind Database::lastErrorKind() const {
+   return m_lastErrorKind;
+}
+
+//******************************************************************************
+
+int Database::lastErrorCode() const {
+   return m_lastErrorCode;
+}
+
+//******************************************************************************
+
+std::string Database::lastErrorMessage() const {
+   return m_lastErrorMessage;
+}
+
+//******************************************************************************
+
+void Database::setLastError(DBErrorKind kind,
+                            int code,
+                            const std::string& message) {
+   m_lastErrorKind = kind;
+   m_lastErrorCode = code;
+   m_lastErrorMessage = message;
+}
+
+//******************************************************************************
+
+void Database::clearLastError() {
+   m_lastErrorKind = DBErrorKind::None;
+   m_lastErrorCode = 0;
+   m_lastErrorMessage.clear();
+}
+
+//******************************************************************************
+
+const char* chapeau::dbErrorKindName(DBErrorKind kind) {
+   switch (kind) {
+      case DBErrorKind::None:             return "None";
+      case DBErrorKind::Sqlite:           return "Sqlite";
+      case DBErrorKind::BindCount:        return "BindCount";
+      case DBErrorKind::BindFailed:       return "BindFailed";
+      case DBErrorKind::NoConnection:     return "NoConnection";
+      case DBErrorKind::AlreadyOpen:      return "AlreadyOpen";
+      case DBErrorKind::InUse:            return "InUse";
+      case DBErrorKind::RefusedStatement: return "RefusedStatement";
+   }
+   return "Unknown";
+}
+
+//******************************************************************************
 //******************************************************************************
 
 DBResultSetStatus DBResultSet::status() const {
@@ -276,6 +330,12 @@ DBResultSetStatus DBResultSet::status() const {
 
 int DBResultSet::lastErrorCode() const {
    return 0;
+}
+
+//******************************************************************************
+
+std::string DBResultSet::lastErrorMessage() const {
+   return std::string();
 }
 
 //******************************************************************************
