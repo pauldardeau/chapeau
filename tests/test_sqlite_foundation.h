@@ -28,6 +28,9 @@ class SQLiteResultSet;
  * update prepared before an ALTER TABLE or CREATE INDEX still works, and sees
  * the new schema, afterwards.
  *
+ * Also covers executeUpdate() refusing, without running them, statements that
+ * return rows (CH-21).
+ *
  * Also covers data fidelity (CH-14 .. CH-19): integers read at full width or
  * saturated, never wrapped; text and blobs with all their bytes; SQL NULL told
  * from an empty blob and from the Unix epoch; the checked integer accessors.
@@ -94,6 +97,7 @@ protected:
    void test_boolean_conversion_of_wide_integers();
    void test_float_binding_is_exact_promotion();
    void test_legacy_result_set_subclass_still_works();
+   void test_execute_update_refuses_row_returning_statements();
 
    void requireLongEquals(long long expected,
                           long long actual,

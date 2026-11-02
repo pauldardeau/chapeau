@@ -782,6 +782,31 @@ std::map<std::string, Scenario> scenarios() {
       checkLong("and every insert ran", 5000, scalar(db, "select count(*) from t"));
    };
 
+   s["ch21_select_in_executeupdate"] = [] {
+      defect("CH-21", "executeUpdate() aborted a debug build (assert) when the statement returned rows");
+      SQLiteDatabase db(g_path);
+      db.setLogsErrors(false);
+      openDb(db);
+      insert3(db);
+
+      unsigned long n = 99;
+      check("a SELECT is refused", !db.executeUpdate("select id from t", n));
+      checkLong("with 0 rows affected", 0, static_cast<long long>(n));
+
+      DBStatementArgs args;
+      args.add(new DBLong(2));
+      n = 99;
+      check("a SELECT with a parameter is refused", !db.executeUpdate("select id from t where id = ?", args, n));
+      checkLong("with 0 rows affected", 0, static_cast<long long>(n));
+
+      n = 99;
+      check("an INSERT ... RETURNING is refused", !db.executeUpdate("insert into t(id,v) values (50,'x') returning id", n));
+      checkLong("and was not run", 3, scalar(db, "select count(*) from t"));
+
+      check("an ordinary update still works afterwards", db.executeUpdate("insert into t(id,v) values (4,'d')", n));
+      checkLong("and is stored", 4, scalar(db, "select count(*) from t"));
+   };
+
    // the messages printed when sqlite3_step() fails: SQLite's own code and
    // message, never "Unknown error" for a code SQLite defines (checked by the
    // MATCH / REJECT patterns of the regression case)

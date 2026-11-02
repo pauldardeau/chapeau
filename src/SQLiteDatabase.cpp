@@ -1,7 +1,6 @@
 //SQLiteDatabase.cpp
 
 #include <stdio.h>
-#include <assert.h>
 
 #include "SQLiteDatabase.h"
 #include "SQLiteResultSet.h"
@@ -145,6 +144,35 @@ bool SQLiteDatabase::prepareStatement(const std::string& sql,
    }
 
    return false;
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::refuseRowReturningUpdate(sqlite3_stmt* pStmt,
+                                              const std::string& sql,
+                                              bool ownedByCache) {
+   // A statement with result columns can return rows: a SELECT, a PRAGMA that
+   // reads a value, INSERT ... RETURNING, EXPLAIN, VALUES. (sqlite3_stmt_readonly
+   // is no help: INSERT ... RETURNING is not read-only, and BEGIN is.) It is
+   // refused before it is run, because running it is not harmless -- the first
+   // step performs an INSERT ... RETURNING or a PRAGMA journal_mode=... and
+   // calls whatever functions a SELECT uses -- so that a false return from
+   // executeUpdate() always means that nothing was done.
+   if (::sqlite3_column_count(pStmt) == 0) {
+      return false;
+   }
+
+   ::printf("Error: executeUpdate was given a statement that returns rows; "
+            "use executeQuery (%s)\n",
+            sql.c_str());
+
+   // finalize only a statement prepared for this call. One that came from
+   // the cache is still the cache's, and stays valid for later executions.
+   if (!ownedByCache) {
+      ::sqlite3_finalize(pStmt);
+   }
+
+   return true;
 }
 
 //******************************************************************************
@@ -710,6 +738,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       }
    }
 
+   if (refuseRowReturningUpdate(pStmt, sql, cachedStmt != nullptr)) {
+      rowsAffectedCount = 0L;
+      return false;
+   }
+
    const int queryCount = ::sqlite3_bind_parameter_count(pStmt);
 
    if (0 != queryCount) {
@@ -737,7 +770,9 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       reportStepError("executeUpdate", rc, sql);
    }
 
-   assert(rc != SQLITE_ROW);
+   // (a statement without result columns, which is all that gets here, cannot
+   // return a row; if SQLite ever did, rc would not be SQLITE_DONE and the call
+   // fails like any other)
 
    if (cacheThis && !cachedStmt) {
       cachedStmt = new SQLiteStatement(pStmt, true);
@@ -814,6 +849,11 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       }
    }
 
+   if (refuseRowReturningUpdate(pStmt, sql, cachedStmt != nullptr)) {
+      affectedRowsCount = 0L;
+      return false;
+   }
+
    const size_t queryCount = ::sqlite3_bind_parameter_count(pStmt);
    const size_t argsCount = args.size();
 
@@ -884,7 +924,9 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
       reportStepError("executeUpdate", rc, sql);
    }
 
-   assert(rc != SQLITE_ROW);
+   // (a statement without result columns, which is all that gets here, cannot
+   // return a row; if SQLite ever did, rc would not be SQLITE_DONE and the call
+   // fails like any other)
 
    if (cachedStmt) {
       ::sqlite3_reset(pStmt);

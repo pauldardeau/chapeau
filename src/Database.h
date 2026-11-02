@@ -311,18 +311,27 @@ public:
    virtual bool bindNull(int idx, DBStatement* statement) = 0;
 
    /**
-    *
+    * Runs a statement that does not return rows (INSERT, UPDATE, DELETE, DDL,
+    * BEGIN/COMMIT, ...). A statement that does return rows -- a SELECT, a
+    * PRAGMA that reads a value, INSERT ... RETURNING, EXPLAIN, VALUES -- is
+    * refused without being run, even if it would return no rows; use
+    * executeQuery() for those.
     * @param sql
-    * @return
+    * @param rowsAffectedCount the rows changed, or 0 when this returns false
+    * @return true if the statement ran to completion; false if it failed or was
+    * refused (a refused statement is not run at all)
     */
    virtual bool executeUpdate(const std::string& sql,
                               unsigned long& rowsAffectedCount) = 0;
 
    /**
-    *
+    * Runs a statement with parameters that does not return rows (see the
+    * overload above, which also says which statements are refused).
     * @param sql
     * @param args
-    * @return
+    * @param rowsAffectedCount the rows changed, or 0 when this returns false
+    * @return true if the statement ran to completion; false if it failed or was
+    * refused (a refused statement is not run at all)
     * @see DBStatementArgs()
     */
    virtual bool executeUpdate(const std::string& sql,

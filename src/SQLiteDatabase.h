@@ -164,6 +164,13 @@ private:
    // for a lock for as long as the busy timeout allows.
    bool prepareStatement(const std::string& sql, sqlite3_stmt** ppStmt);
 
+   // executeUpdate() runs statements that do not return rows. Returns true, after
+   // reporting it, if pStmt has result columns and so must not be run; the
+   // statement is finalized unless the cache owns it.
+   bool refuseRowReturningUpdate(sqlite3_stmt* pStmt,
+                                 const std::string& sql,
+                                 bool ownedByCache);
+
    // Result sets created by this database that have not been closed or
    // destroyed yet. close() and the destructor invalidate each of them
    // (see SQLiteResultSet::invalidate) so that none outlives the connection

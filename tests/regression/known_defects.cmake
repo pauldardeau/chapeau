@@ -50,4 +50,7 @@ set(CHAPEAU_FIXED_TABLE
    "CH-11|ch11_in_transaction_follows_external_commit|60|inTransaction() stale after a COMMIT run as plain SQL"
    "CH-12|ch12_open_twice_keeps_one_connection|60|a second open() leaked the first connection"
    "CH-13|ch13_statement_cache_is_bounded|60|the statement cache grows without bound"
+   # CH-21 (H1a-7a): executeUpdate() refuses a statement that returns rows instead of
+   # asserting
+   "CH-21|ch21_select_in_executeupdate|60|executeUpdate() asserts when the statement returns rows"
 )

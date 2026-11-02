@@ -139,6 +139,7 @@ void TestSQLiteFoundation::runTests() {
    test_boolean_conversion_of_wide_integers();
    test_float_binding_is_exact_promotion();
    test_legacy_result_set_subclass_still_works();
+   test_execute_update_refuses_row_returning_statements();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -3376,4 +3377,159 @@ void TestSQLiteFoundation::test_legacy_result_set_subclass_still_works() {
 
    require(base.status() == DBResultSetStatus::Ready, "status() defaults to Ready (H1a-4)");
    requireLongEquals(0, base.lastErrorCode(), "lastErrorCode() defaults to 0 (H1a-4)");
+}
+
+// ---- executeUpdate() and statements that return rows (CH-21) ----------------
+
+namespace {
+
+int g_sideEffectCalls = 0;
+
+// a SQL function with a visible side effect: the proof that a SELECT is not
+// harmless, and that a refused one was never run
+void sideEffectFunction(sqlite3_context* context, int, sqlite3_value**) {
+   ++g_sideEffectCalls;
+   sqlite3_result_int(context, g_sideEffectCalls);
+}
+
+}
+
+void TestSQLiteFoundation::test_execute_update_refuses_row_returning_statements() {
+   TEST_CASE("test_execute_update_refuses_row_returning_statements");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("update_select.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(createItemsWithoutCachedStatements(db), "create and fill the items table");
+   require(sqlite3_create_function(db.sqliteHandle(), "bump", 0, SQLITE_UTF8, nullptr,
+                                   sideEffectFunction, nullptr, nullptr) == SQLITE_OK,
+           "register a function with a side effect");
+
+   struct Refused {
+      const char* label;
+      const char* sql;
+      bool withArgument;   // run through the overload with arguments (one INTEGER 2)
+   };
+   const Refused refused[] = {
+      {"SELECT", "select id from items", false},
+      {"SELECT returning no rows", "select id from items where id > 1000", false},
+      {"SELECT with a parameter", "select id from items where id = ?", true},
+      {"SELECT through the argument overload without parameters", "select id from items", true},
+      {"INSERT ... RETURNING", "insert into items(id,name) values (900,'x') returning id", false},
+      {"INSERT ... RETURNING with a parameter", "insert into items(id,name) values (?,'x') returning id", true},
+      {"PRAGMA that reads a value", "pragma user_version", false},
+      {"PRAGMA that sets a value and returns it", "pragma journal_mode = memory", false},
+      {"VALUES", "values (1)", false},
+      {"EXPLAIN", "explain select 1", false},
+      {"SELECT calling a function with a side effect", "select bump()", false},
+   };
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      db.clearCachedStatements();
+      g_sideEffectCalls = 0;
+
+      for (const Refused& r : refused) {
+         const string label = when + ", " + r.label;
+         const int errorBefore = db.lastErrorCode();
+         const vector<string> statementsBefore = openStatementSql(db);
+         unsigned long rowsAffected = 99;
+
+         bool result = true;
+         if (r.withArgument) {
+            DBStatementArgs args;
+            args.add(new DBLong(2));
+            result = db.executeUpdate(r.sql, args, rowsAffected);
+         } else {
+            result = db.executeUpdate(r.sql, rowsAffected);
+         }
+
+         require(!result, label + ": refused (returns false)");
+         requireLongEquals(0, rowsAffected, label + ": no rows affected");
+         requireLongEquals(errorBefore, db.lastErrorCode(), label + ": the connection's error state is untouched");
+         require(!db.inTransaction(), label + ": no transaction was started");
+         require(openStatementSql(db) == statementsBefore,
+                 label + ": no statement was left behind or taken away: " + describe(openStatementSql(db)));
+      }
+
+      // refused means not run: none of the effects a row-returning statement can have happened
+      requireLongEquals(3, scalar(db, "select count(*) from items"), when + ": nothing was inserted");
+      requireLongEquals(0, g_sideEffectCalls, when + ": the function in a refused SELECT was never called");
+      {
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, "pragma journal_mode"));
+         require(rs && rs->next(), when + ": read the journal mode");
+         if (rs) {
+            requireStringEquals("delete", firstText(*rs), when + ": the refused PRAGMA did not change it");
+         }
+      }
+
+      // the connection and its statements are fine afterwards
+      unsigned long rowsAffected = 0;
+      require(db.executeUpdate("update items set qty = qty + 1 where id = 1", rowsAffected),
+              when + ": an ordinary update still works");
+      requireLongEquals(1, rowsAffected, when + ": and reports its row");
+      DBStatementArgs args;
+      args.add(new DBLong(4));
+      args.add(new DBString("added"));
+      require(db.executeUpdate("insert into items(id,name) values (?,?)", args, rowsAffected),
+              when + ": so does one with arguments");
+      require(db.executeUpdate("delete from items where id = 4", rowsAffected),
+              when + ": and the cleanup");
+      requireLongEquals(3, scalar(db, "select count(*) from items"), when + ": rows as before");
+      require(exec(db, "update items set qty = qty - 1 where id = 1"), when + ": undo the update");
+   }
+   db.setShouldCacheStatements(true);
+   db.clearCachedStatements();
+
+   {
+      // a statement the cache owns, and then the same SQL given to executeUpdate: the cache is not hurt
+      const char* const sql = "select id from items order by id";
+      for (int round = 0; round < 3; ++round) {
+         const string label = "round " + to_string(round);
+         {
+            unique_ptr<SQLiteResultSet> rs(openCursor(db, sql));
+            int rows = 0;
+            while (rs && rows < 3 && rs->next()) {
+               ++rows;
+            }
+            requireLongEquals(3, rows, label + ": the cached query returns its rows");
+         }
+         unsigned long rowsAffected = 99;
+         require(!db.executeUpdate(sql, rowsAffected), label + ": the same SQL is refused by executeUpdate");
+         requireLongEquals(0, rowsAffected, label + ": with no rows affected");
+         require(openStatementSql(db) == vector<string>{sql},
+                 label + ": the cached statement is still the one open statement: " + describe(openStatementSql(db)));
+      }
+   }
+
+   {
+      // an active result set owns the cached statement; the refusal must not touch it
+      const char* const sql = "select id from items order by id";
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, sql));
+      require(rs && rs->next(), "an active result set");
+      requireLongEquals(1, rs ? rs->intForColumnIndex(0) : -1, "on its first row");
+      unsigned long rowsAffected = 99;
+      require(!db.executeUpdate(sql, rowsAffected), "executeUpdate of the same SQL is refused");
+      require(openStatementSql(db) == vector<string>{sql}, "no extra statement is left open");
+      if (rs) {
+         require(rs->next(), "the result set carries on");
+         requireLongEquals(2, rs->intForColumnIndex(0), "with its second row");
+         require(rs->next() && !rs->next(), "to its end");
+         require(rs->status() == DBResultSetStatus::Done, "which is a normal end");
+      }
+   }
+
+   {
+      // inside a transaction
+      require(db.beginTransaction(), "begin");
+      unsigned long rowsAffected = 99;
+      require(!db.executeUpdate("select 1", rowsAffected), "a SELECT inside a transaction is refused");
+      require(db.inTransaction(), "the transaction is still open");
+      require(exec(db, "insert into items(id,name) values (5,'five')"), "work inside it");
+      require(db.commit(), "it commits");
+      requireLongEquals(1, countFromNewConnection(dir.file("update_select.sqlite3"), "items where id = 5"),
+                        "and the committed row is there");
+   }
+   db.close();
 }
