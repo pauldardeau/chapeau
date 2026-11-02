@@ -1,6 +1,9 @@
 #include "test_sqlite_foundation.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <climits>
 #include <cstdint>
 #include <cstring>
@@ -9,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "scoped_temp_dir.h"
@@ -157,6 +161,16 @@ void TestSQLiteFoundation::runTests() {
    test_statement_boundary_with_transactions_and_cursors();
    test_error_kind_names();
    test_open_with_a_threadsafe_library();
+   test_public_and_internal_call_sequences();
+   test_cache_operations_after_separation();
+   test_cursor_destruction_paths();
+   test_error_snapshot_rules_unchanged();
+   test_cursor_status_transitions_unchanged();
+   test_inuse_marker_survives_a_cursor_ending();
+   test_error_snapshot_is_published_as_one_record();
+   test_settings_can_be_read_while_they_are_set();
+   test_cursor_status_can_be_observed_from_another_thread();
+   test_accessors_by_name_and_by_index_agree();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -5434,4 +5448,695 @@ void TestSQLiteFoundation::test_open_with_a_threadsafe_library() {
    require(missing.open(), "now it opens");
    requireLastError(missing, DBErrorKind::None, 0, "", "and the error is cleared");
    missing.close();
+}
+
+// ---- H1a-12d: preparing for a unit guard --------------------------------------
+//
+// The library's own code no longer reaches a public method through another
+// (public entry points do their work in '...Internal' methods), the database's
+// error snapshot is one record behind a mutex of its own, the settings that are
+// read on their own are atomic, and a cursor's status is published for another
+// thread to observe. None of that may be visible to a single-threaded caller:
+// the tests up to 'test_inuse_marker...' state the behavior that must not
+// change (and pass on the code before the refactoring); the last three test
+// the new guarantees.
+
+namespace {
+
+// records the SQL of every statement that SQLite starts running on a connection
+int traceStatement(unsigned type, void* context, void* p, void*) {
+   if (type == SQLITE_TRACE_STMT) {
+      const char* text = sqlite3_sql(static_cast<sqlite3_stmt*>(p));
+      static_cast<vector<string>*>(context)->push_back(text != nullptr ? text : "");
+   }
+   return 0;
+}
+
+// how many statements of the connection are in the middle of a run (and so hold a lock)
+int runningStatements(SQLiteDatabase& db) {
+   int running = 0;
+   for (sqlite3_stmt* s : openStatementHandles(db)) {
+      if (sqlite3_stmt_busy(s)) {
+         ++running;
+      }
+   }
+   return running;
+}
+
+}
+
+void TestSQLiteFoundation::test_public_and_internal_call_sequences() {
+   TEST_CASE("test_public_and_internal_call_sequences");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("sequences.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+
+   // goodConnection() on a database that is not open runs nothing
+   require(!db.goodConnection(), "goodConnection() without a connection");
+   requireLastError(db, DBErrorKind::NoConnection, 0, "no database connection", "goodConnection() without a connection");
+
+   require(db.open(), "open");
+   vector<string> ran;
+   require(sqlite3_trace_v2(db.sqliteHandle(), SQLITE_TRACE_STMT, traceStatement, &ran) == SQLITE_OK, "trace the statements");
+
+   // goodConnection(): it prepares one query and lets its result set go without
+   // stepping it, so SQLite runs nothing; the statement stays in the cache
+   const string goodQuery = "select name from sqlite_master where type='table'";
+   require(db.cachedStatementForQuery(goodQuery) == nullptr, "the query is not cached yet");
+   require(db.goodConnection(), "goodConnection()");
+   requireLastError(db, DBErrorKind::None, 0, "", "after goodConnection()");
+   requireLongEquals(0, (long long) ran.size(), "goodConnection() steps no statement");
+   require(db.cachedStatementForQuery(goodQuery) != nullptr, "it prepared the query, and the cache holds it");
+   requireLongEquals(1, (long long) openStatementSql(db).size(), "SQLite holds that one statement");
+   requireLongEquals(0, runningStatements(db), "and none is in the middle of a run");
+   require(db.goodConnection() && ran.empty(), "and again, from the cache");
+   requireLongEquals(1, (long long) openStatementSql(db).size(), "still the one statement");
+
+   // the transaction helpers: one statement each, the same text, the same state afterwards
+   require(exec(db, "create table acct(id integer primary key, v integer)"), "create a table");
+   ran.clear();
+   require(!db.inTransaction() && !db.inUse(), "no transaction, not in use");
+   require(db.beginTransaction(), "beginTransaction()");
+   requireLongEquals(1, (long long) ran.size(), "beginTransaction() runs one statement");
+   requireStringEquals("BEGIN EXCLUSIVE TRANSACTION;", ran.empty() ? "" : ran[0], "BEGIN EXCLUSIVE");
+   require(db.inTransaction(), "in a transaction");
+   require(db.inUse(), "inUse() is true inside a transaction");
+   require(exec(db, "insert into acct(id, v) values (1, 10)"), "insert in the transaction");
+   ran.clear();
+   require(db.commit(), "commit()");
+   requireLongEquals(1, (long long) ran.size(), "commit() runs one statement");
+   requireStringEquals("COMMIT TRANSACTION;", ran.empty() ? "" : ran[0], "COMMIT");
+   require(!db.inTransaction() && !db.inUse(), "and the transaction is over");
+   requireLongEquals(1, countFromNewConnection(path, "acct"), "the row was committed");
+
+   ran.clear();
+   require(db.beginDeferredTransaction(), "beginDeferredTransaction()");
+   requireStringEquals("BEGIN DEFERRED TRANSACTION;", ran.empty() ? "" : ran[0], "BEGIN DEFERRED");
+   require(exec(db, "insert into acct(id, v) values (2, 20)"), "insert in the second transaction");
+   ran.clear();
+   require(db.rollback(), "rollback()");
+   requireLongEquals(1, (long long) ran.size(), "rollback() runs one statement");
+   requireStringEquals("ROLLBACK TRANSACTION;", ran.empty() ? "" : ran[0], "ROLLBACK");
+   require(!db.inTransaction(), "and it is over");
+   requireLongEquals(1, scalar(db, "select count(*) from acct"), "the rolled-back row is gone");
+
+   // the transaction helpers say why they failed, the same way as before
+   require(!db.commit(), "commit() with no transaction");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "no transaction is active", "commit() with no transaction");
+
+   // close(): live result sets are invalidated, the cache is emptied, nothing runs
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select id from acct"));
+   require(rs && rs->next(), "a live result set");
+   db.close();
+   require(db.sqliteHandle() == nullptr, "closed");
+   require(rs->status() == DBResultSetStatus::Invalidated, "the live result set was invalidated");
+   require(!rs->next(), "and is at its end");
+   rs.reset();
+   require(db.open(), "reopen");
+   require(db.goodConnection(), "and it works");
+}
+
+void TestSQLiteFoundation::test_cache_operations_after_separation() {
+   TEST_CASE("test_cache_operations_after_separation");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("cache.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   db.setStatementCacheLimit(2);
+   requireLongEquals(2, (long long) db.statementCacheLimit(), "the limit");
+   require(db.shouldCacheStatements(), "caching is on");
+
+   auto run = [&](const string& sql) {
+      unique_ptr<DBResultSet> rs(db.executeQuery(sql));
+      return rs && rs->next();
+   };
+   const string q1 = "select 1", q2 = "select 2", q3 = "select 3", q4 = "select 4";
+   require(run(q1) && run(q2) && run(q3), "three queries with room for two");
+   require(db.cachedStatementForQuery(q1) == nullptr, "the least recently used one was evicted");
+   require(db.cachedStatementForQuery(q2) != nullptr, "q2 is cached (and is now the most recently used)");
+   require(run(q4), "a fourth query");
+   require(db.cachedStatementForQuery(q3) == nullptr, "q3 was the least recently used and was evicted");
+   require(db.cachedStatementForQuery(q2) != nullptr && db.cachedStatementForQuery(q4) != nullptr, "q2 and q4 are cached");
+   requireLongEquals(2, (long long) openStatementSql(db).size(), "SQLite holds exactly the two cached statements");
+
+   db.setStatementCacheLimit(1);
+   require(db.cachedStatementForQuery(q4) != nullptr && db.cachedStatementForQuery(q2) == nullptr, "lowering the limit evicts all but the most recent");
+   requireLongEquals(1, (long long) openStatementSql(db).size(), "and SQLite holds one");
+
+   db.clearCachedStatements();
+   require(db.cachedStatementForQuery(q4) == nullptr, "clearCachedStatements() empties it");
+   requireLongEquals(0, (long long) openStatementSql(db).size(), "and finalizes everything");
+
+   // switching the cache off while a result set is using a cached statement: the
+   // result set keeps working and finalizes the statement when it ends
+   db.setStatementCacheLimit(8);
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select 5 union all select 6"));
+   require(rs && rs->next() && rs->longForColumnIndex(0) == 5, "a result set on a cached statement");
+   db.setShouldCacheStatements(false);
+   require(!db.shouldCacheStatements(), "caching is off");
+   require(db.cachedStatementForQuery("select 5 union all select 6") == nullptr, "the cache is empty");
+   require(rs->next() && rs->longForColumnIndex(0) == 6, "the result set carries on");
+   require(!rs->next() && rs->status() == DBResultSetStatus::Done, "and ends");
+   rs.reset();
+   requireLongEquals(0, (long long) openStatementSql(db).size(), "its statement was finalized");
+   db.setShouldCacheStatements(true);
+   require(db.shouldCacheStatements(), "caching is on again");
+   db.setStatementCacheLimit(0);
+   require(!db.shouldCacheStatements(), "a limit of 0 means no caching");
+}
+
+void TestSQLiteFoundation::test_cursor_destruction_paths() {
+   TEST_CASE("test_cursor_destruction_paths");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("destroy.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open() && createItems(db), "open and fill");
+
+   SQLiteDatabase other(path);
+   other.setLogsErrors(false);
+   other.setBusyRetryTimeout(0);
+   require(other.open(), "a second connection");
+   const char* const WRITE = "insert into items(id,name,qty,price) values (%d,'x',1,1.0)";
+   auto write = [&](int id) {
+      char sql[128];
+      snprintf(sql, sizeof sql, WRITE, id);
+      return exec(other, sql);
+   };
+
+   // destroyed in the middle of iterating: the statement is let go of, so the lock is too
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "a result set in the middle of its rows");
+      require(!write(10), "a writer elsewhere is kept out while it is live");
+      requireLongEquals(1, runningStatements(db), "one statement is running");
+   }
+   requireLongEquals(0, runningStatements(db), "after destruction nothing is running");
+   require(write(10), "and the writer gets in");
+
+   // closed, then destroyed
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "another result set");
+      rs->close();
+      require(rs->status() == DBResultSetStatus::Done, "closed: Done");
+      require(write(11), "its lock is gone already");
+   }
+
+   // an uncached statement is deleted with its result set
+   db.setShouldCacheStatements(false);
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "an uncached result set");
+      requireLongEquals(1, (long long) openStatementSql(db).size(), "its statement exists");
+   }
+   requireLongEquals(0, (long long) openStatementSql(db).size(), "and is finalized with it");
+   db.setShouldCacheStatements(true);
+
+   // destroyed after the database was closed, and after it was destroyed
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->next(), "a result set before close()");
+      db.close();
+      require(rs->status() == DBResultSetStatus::Invalidated, "Invalidated by the close");
+   }
+   {
+      unique_ptr<SQLiteDatabase> mortal(new SQLiteDatabase(path));
+      mortal->setLogsErrors(false);
+      require(mortal->open(), "a database that will be destroyed");
+      unique_ptr<SQLiteResultSet> rs(openCursor(*mortal, ITEMS_BY_ID));
+      require(rs && rs->next(), "a result set before the destruction");
+      mortal.reset();
+      require(rs->status() == DBResultSetStatus::Invalidated, "Invalidated by the destruction");
+      require(!rs->next() && rs->longForColumnIndex(0) == 0, "and answers like a NULL column");
+   }
+   require(write(12), "and no lock is left behind by any of it");
+}
+
+void TestSQLiteFoundation::test_error_snapshot_rules_unchanged() {
+   TEST_CASE("test_error_snapshot_rules_unchanged");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("snapshot.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table u(id integer primary key)"), "create");
+   requireLastError(db, DBErrorKind::None, 0, "", "a success leaves it cleared");
+   require(!db.hadError(), "hadError() is false");
+
+   // a failure records its kind, code and message together
+   require(!exec(db, "insert into u(id) values (1),(1)"), "a duplicate key");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed: u.id", "recorded");
+   const string message = db.lastErrorMessage();
+
+   // reading does not clear, whatever the number of reads
+   for (int i = 0; i < 3; ++i) {
+      require(db.lastErrorKind() == DBErrorKind::Sqlite && db.lastErrorCode() == SQLITE_CONSTRAINT && db.lastErrorMessage() == message && db.hadError(),
+              "read " + to_string(i) + " times: the same record");
+   }
+
+   // another kind of failure replaces all three, leaving nothing of the first
+   require(!exec(db, "select 1; select 2"), "two statements");
+   require(db.lastErrorKind() == DBErrorKind::RefusedStatement && db.lastErrorCode() == 0, "the new kind and code");
+   require(db.lastErrorMessage().find("UNIQUE") == string::npos && db.lastErrorMessage().find("more after") != string::npos, "and the new message only");
+
+   // a success clears all three
+   require(exec(db, "insert into u(id) values (2)"), "a success");
+   requireLastError(db, DBErrorKind::None, 0, "", "cleared");
+
+   // what the library does internally does not touch it: a result set ending
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select id from u"));
+   require(rs != nullptr, "a result set (the call that made it cleared the error)");
+   require(!exec(db, "insert into u(id) values (2)"), "a failure while it is open");
+   const string kept = db.lastErrorMessage();
+   while (rs->next()) {
+   }
+   require(rs->status() == DBResultSetStatus::Done, "the result set ended");
+   rs.reset();
+   require(db.lastErrorKind() == DBErrorKind::Sqlite && db.lastErrorMessage() == kept, "and its ending left the error alone");
+   db.setShouldCacheStatements(false);
+   db.setShouldCacheStatements(true);
+   require(db.lastErrorMessage() == kept, "as did emptying the cache");
+
+   // a result set that fails in next() records its error in the database too
+   unique_ptr<SQLiteResultSet> bad(openCursor(db, "select abs(-9223372036854775807-1)"));
+   require(bad != nullptr, "a query that fails when stepped");
+   require(!bad->next() && bad->status() == DBResultSetStatus::Error, "it fails");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "integer overflow", "and the database says so");
+   bad.reset();
+
+   // close() clears it
+   db.close();
+   requireLastError(db, DBErrorKind::None, 0, "", "close() clears it");
+}
+
+void TestSQLiteFoundation::test_cursor_status_transitions_unchanged() {
+   TEST_CASE("test_cursor_status_transitions_unchanged");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("status.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open() && createItems(db), "open and fill");
+
+   // the values of the enumerators are part of the interface
+   requireLongEquals(0, (long long) DBResultSetStatus::Ready, "Ready");
+   requireLongEquals(1, (long long) DBResultSetStatus::Row, "Row");
+   requireLongEquals(2, (long long) DBResultSetStatus::Done, "Done");
+   requireLongEquals(3, (long long) DBResultSetStatus::Error, "Error");
+   requireLongEquals(4, (long long) DBResultSetStatus::Invalidated, "Invalidated");
+
+   // Ready, Row, Row, Row, Done; and it stays Done
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, ITEMS_BY_ID));
+      require(rs && rs->status() == DBResultSetStatus::Ready, "Ready");
+      for (int i = 0; i < 3; ++i) {
+         require(rs->next() && rs->status() == DBResultSetStatus::Row, "Row " + to_string(i));
+      }
+      require(!rs->next() && rs->status() == DBResultSetStatus::Done, "Done at the end");
+      require(rs->lastErrorCode() == 0 && rs->lastErrorMessage().empty(), "with no error");
+      require(!rs->next() && rs->status() == DBResultSetStatus::Done, "and it stays Done");
+   }
+
+   // a statement without result columns is born Done
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "update items set qty = qty where id = 1"));
+      require(rs && rs->status() == DBResultSetStatus::Done, "an update run by executeQuery() is born Done");
+   }
+
+   // Error keeps its code and message, and is not turned into anything else
+   {
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, "select abs(-9223372036854775807-1)"));
+      require(rs && rs->status() == DBResultSetStatus::Ready, "Ready before the failing step");
+      require(!rs->next(), "the step fails");
+      require(rs->status() == DBResultSetStatus::Error, "Error");
+      requireLongEquals(SQLITE_ERROR, rs->lastErrorCode(), "with SQLite's code");
+      require(rs->lastErrorMessage().find("integer overflow") != string::npos, "and its message");
+      rs->close();
+      require(rs->status() == DBResultSetStatus::Error, "close() does not change it");
+      db.close();
+      require(rs->status() == DBResultSetStatus::Error, "nor does the database closing");
+      requireLongEquals(SQLITE_ERROR, rs->lastErrorCode(), "the code stays");
+      require(rs->lastErrorMessage().find("integer overflow") != string::npos, "and so does the message");
+      require(db.open(), "reopen");
+   }
+
+   // Done is not turned into Invalidated by a later close; a live one is
+   {
+      unique_ptr<SQLiteResultSet> finished(openCursor(db, "select id from items where id = 1"));
+      unique_ptr<SQLiteResultSet> live(openCursor(db, ITEMS_BY_ID));
+      require(finished && live && finished->next() && !finished->next() && live->next(), "one finished, one live");
+      require(finished->status() == DBResultSetStatus::Done && live->status() == DBResultSetStatus::Row, "Done and Row");
+      db.close();
+      require(finished->status() == DBResultSetStatus::Done, "the finished one is still Done");
+      require(live->status() == DBResultSetStatus::Invalidated, "the live one is Invalidated");
+      require(live->lastErrorCode() == 0 && live->lastErrorMessage().empty(), "with no error");
+      live->close();
+      require(live->status() == DBResultSetStatus::Invalidated, "and close() leaves it so");
+   }
+}
+
+namespace {
+
+// state shared with the SQL function below
+struct InUseProbe {
+   SQLiteDatabase* db = nullptr;
+   SQLiteResultSet* cursorToEnd = nullptr;   // ended from inside the function, if set
+   DBResultSet* nested = nullptr;
+   DBErrorKind nestedKind = DBErrorKind::None;
+   bool called = false;
+} g_inUseProbe;
+
+void callAnotherOperation(sqlite3_context* context, int, sqlite3_value**) {
+   InUseProbe& p = g_inUseProbe;
+   p.called = true;
+   if (p.cursorToEnd != nullptr) {
+      p.cursorToEnd->close();   // a result set ends while the update is running
+   }
+   p.nested = p.db->executeQuery("select 1");
+   p.nestedKind = p.db->lastErrorKind();
+   sqlite3_result_int(context, 1);
+}
+
+}
+
+void TestSQLiteFoundation::test_inuse_marker_survives_a_cursor_ending() {
+   TEST_CASE("test_inuse_marker_survives_a_cursor_ending");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("inuse.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open() && createItems(db), "open and fill");
+   require(sqlite3_create_function(db.sqliteHandle(), "other_op", 0, SQLITE_UTF8, nullptr, callAnotherOperation, nullptr, nullptr) == SQLITE_OK,
+           "a SQL function that calls the database");
+
+   // 1. the call from inside an update is refused, as it always was
+   g_inUseProbe = InUseProbe();
+   g_inUseProbe.db = &db;
+   require(exec(db, "update items set qty = other_op() where id = 1"), "the update itself succeeds");
+   require(g_inUseProbe.called, "the function ran");
+   require(g_inUseProbe.nested == nullptr && g_inUseProbe.nestedKind == DBErrorKind::InUse, "its call of the database was refused with InUse");
+   requireLastError(db, DBErrorKind::None, 0, "", "and the update's success cleared the error");
+
+   // 2. a result set that ends in the middle of the update used to clear the
+   //    marker of the update, so that the next call from inside it got in. This
+   //    is the one deliberate difference: only the call that set the marker
+   //    clears it, and the call is still refused.
+   unique_ptr<SQLiteResultSet> other(openCursor(db, ITEMS_BY_ID));
+   require(other && other->next(), "a result set that is live");
+   g_inUseProbe = InUseProbe();
+   g_inUseProbe.db = &db;
+   g_inUseProbe.cursorToEnd = other.get();
+   require(exec(db, "update items set qty = other_op() where id = 1"), "the update succeeds");
+   require(g_inUseProbe.called && other->status() == DBResultSetStatus::Done, "the function ran and ended the result set");
+   require(g_inUseProbe.nested == nullptr && g_inUseProbe.nestedKind == DBErrorKind::InUse,
+           "and the call that followed it was still refused");
+   delete g_inUseProbe.nested;
+   other.reset();
+
+   // 3. after every call the marker is down again
+   require(!db.inUse(), "not in use afterwards");
+   require(scalar(db, "select count(*) from items") == 3, "and the database works");
+}
+
+namespace {
+
+// the three records the snapshot test publishes, long enough to leave the small-string buffer
+const char* const SNAPSHOT_MESSAGE_1 = "UNIQUE constraint failed: t.id -- the first record, in the heap";
+const char* const SNAPSHOT_MESSAGE_2 = "the SQL has more after its first statement -- the second record";
+
+class SnapshotProbe : public SQLiteDatabase {
+public:
+   SnapshotProbe() : SQLiteDatabase(":memory:") {}
+   void publish(DBErrorKind kind, int code, const string& message) { setLastError(kind, code, message); }
+   void erase() { clearLastError(); }
+   using Record = LastError;
+   Record record() const { return lastErrorRecord(); }
+};
+
+bool isOneOfTheRecords(DBErrorKind kind, int code, const string& message) {
+   return (kind == DBErrorKind::None && code == 0 && message.empty()) ||
+          (kind == DBErrorKind::Sqlite && code == SQLITE_CONSTRAINT && message == SNAPSHOT_MESSAGE_1) ||
+          (kind == DBErrorKind::RefusedStatement && code == 0 && message == SNAPSHOT_MESSAGE_2);
+}
+
+}
+
+void TestSQLiteFoundation::test_error_snapshot_is_published_as_one_record() {
+   TEST_CASE("test_error_snapshot_is_published_as_one_record");
+   SnapshotProbe probe;
+   const int ROUNDS = 40000;
+   atomic<bool> done(false);
+   atomic<long> incoherent(0);
+   atomic<long> reads(0);
+   atomic<long> sawFailure(0);
+
+   // one thread replaces the record over and over; this one reads it as a whole.
+   // Every record read must be exactly one of the three that were published.
+   thread writer([&] {
+      for (int i = 0; i < ROUNDS; ++i) {
+         switch (i % 3) {
+            case 0: probe.publish(DBErrorKind::Sqlite, SQLITE_CONSTRAINT, SNAPSHOT_MESSAGE_1); break;
+            case 1: probe.publish(DBErrorKind::RefusedStatement, 0, SNAPSHOT_MESSAGE_2); break;
+            default: probe.erase(); break;
+         }
+      }
+      done = true;
+   });
+   while (!done.load()) {
+      const SnapshotProbe::Record r = probe.record();
+      ++reads;
+      if (!isOneOfTheRecords(r.kind, r.code, r.message)) {
+         ++incoherent;
+      }
+      if (r.kind != DBErrorKind::None) {
+         ++sawFailure;
+      }
+   }
+   writer.join();
+   require(reads.load() > 0, "the reader read the record");
+   requireLongEquals(0, incoherent.load(), "every record read was a whole record that had been published");
+   require(sawFailure.load() > 0, "and the reader did see failures being published");
+
+   // the three getters, each on its own, never return half of a message
+   atomic<bool> done2(false);
+   atomic<long> torn(0);
+   thread writer2([&] {
+      for (int i = 0; i < ROUNDS; ++i) {
+         if (i % 2 == 0) {
+            probe.publish(DBErrorKind::Sqlite, SQLITE_CONSTRAINT, SNAPSHOT_MESSAGE_1);
+         } else {
+            probe.publish(DBErrorKind::RefusedStatement, 0, SNAPSHOT_MESSAGE_2);
+         }
+      }
+      done2 = true;
+   });
+   while (!done2.load()) {
+      const string m = probe.lastErrorMessage();
+      if (m != SNAPSHOT_MESSAGE_1 && m != SNAPSHOT_MESSAGE_2 && !m.empty()) {
+         ++torn;
+      }
+      const DBErrorKind k = probe.lastErrorKind();
+      const int c = probe.lastErrorCode();
+      if ((k != DBErrorKind::None && k != DBErrorKind::Sqlite && k != DBErrorKind::RefusedStatement) || (c != 0 && c != SQLITE_CONSTRAINT)) {
+         ++torn;
+      }
+   }
+   writer2.join();
+   requireLongEquals(0, torn.load(), "each getter returns a value that was published");
+
+   // single-threaded: the getters and the record agree
+   probe.publish(DBErrorKind::Sqlite, SQLITE_CONSTRAINT, SNAPSHOT_MESSAGE_1);
+   const SnapshotProbe::Record r = probe.record();
+   require(r.kind == probe.lastErrorKind() && r.code == probe.lastErrorCode() && r.message == probe.lastErrorMessage(), "the record is what the getters return");
+   require(probe.hadError(), "hadError()");
+   probe.erase();
+   require(!probe.hadError() && probe.lastErrorMessage().empty(), "and erase() clears all three");
+}
+
+void TestSQLiteFoundation::test_settings_can_be_read_while_they_are_set() {
+   TEST_CASE("test_settings_can_be_read_while_they_are_set");
+   // Not open: there is no connection, so the busy-timeout setter has nothing to
+   // call, and the statement cache is empty, so the cache setters have nothing
+   // to evict. What is left is exactly the scalars: one thread sets them, this
+   // one reads them. (A setter that does touch the cache or the connection is
+   // not for another thread to overlap with anything, and is not tested so.)
+   SQLiteDatabase db(":memory:");
+   atomic<bool> done(false);
+   atomic<long> outOfRange(0);
+   const int ROUNDS = 50000;
+
+   thread writer([&] {
+      for (int i = 0; i < ROUNDS; ++i) {
+         const bool on = (i % 2) == 0;
+         db.setLogsErrors(on);
+         db.setCrashOnErrors(on);
+         db.setTraceExecution(on);
+         db.setCheckedOut(on);
+         db.setInUse(on);
+         db.setBusyRetryTimeout(on ? 100 : 7);
+         db.setStatementCacheLimit(1 + (i % 8));
+         db.setShouldCacheStatements(on);
+      }
+      done = true;
+   });
+   while (!done.load()) {
+      db.logsErrors();
+      db.crashOnErrors();
+      db.traceExecution();
+      db.checkedOut();
+      db.inUse();
+      db.shouldCacheStatements();
+      const int t = db.busyRetryTimeout();
+      if (t != 100 && t != 7 && t != SQLiteDatabase::DEFAULT_BUSY_TIMEOUT_MS) {
+         ++outOfRange;
+      }
+      const size_t limit = db.statementCacheLimit();
+      if (limit < 1 || (limit > 8 && limit != Database::DEFAULT_STATEMENT_CACHE_LIMIT)) {
+         ++outOfRange;
+      }
+   }
+   writer.join();
+   requireLongEquals(0, outOfRange.load(), "the timeout and the cache limit were always values that were set");
+
+   // the last write is what is read
+   db.setLogsErrors(true);
+   db.setCheckedOut(true);
+   db.setBusyRetryTimeout(-5);
+   require(db.logsErrors(), "logsErrors()");
+   require(db.checkedOut(), "checkedOut()");
+   requireLongEquals(0, db.busyRetryTimeout(), "a negative timeout is stored as 0, as before");
+}
+
+void TestSQLiteFoundation::test_cursor_status_can_be_observed_from_another_thread() {
+   TEST_CASE("test_cursor_status_can_be_observed_from_another_thread");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("observe.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   struct Seen {
+      DBResultSetStatus status = DBResultSetStatus::Ready;
+      int code = -1;
+      string message;
+      bool sawFinal = false;
+   };
+
+   // The owner thread steps the cursor; another thread only watches status()
+   // and, once the status is final, reads the code and the message that were
+   // published with it. It must find them complete.
+   for (const bool fails : {true, false}) {
+      const string sql = fails ? "select abs(-9223372036854775807-1)" : "select 1";
+      unique_ptr<SQLiteResultSet> rs(openCursor(db, sql));
+      require(rs != nullptr, "a cursor");
+      Seen seen;
+      atomic<bool> watching(false);
+      thread watcher([&] {
+         watching = true;
+         const auto deadline = chrono::steady_clock::now() + chrono::seconds(10);
+         while (chrono::steady_clock::now() < deadline) {
+            const DBResultSetStatus s = rs->status();
+            if (s == DBResultSetStatus::Done || s == DBResultSetStatus::Error || s == DBResultSetStatus::Invalidated) {
+               seen.status = s;
+               seen.code = rs->lastErrorCode();
+               seen.message = rs->lastErrorMessage();
+               seen.sawFinal = true;
+               return;
+            }
+            this_thread::yield();
+         }
+      });
+      while (!watching.load()) {
+         this_thread::yield();
+      }
+      this_thread::sleep_for(chrono::milliseconds(2));
+      if (fails) {
+         require(!rs->next(), "the step fails");
+      } else {
+         require(rs->next() && !rs->next(), "the cursor runs to its end");
+      }
+      watcher.join();
+      require(seen.sawFinal, string(fails ? "failing" : "plain") + ": the watcher saw a final status");
+      if (fails) {
+         require(seen.status == DBResultSetStatus::Error, "failing: Error");
+         requireLongEquals(SQLITE_ERROR, seen.code, "failing: the code that was published with it");
+         require(seen.message.find("integer overflow") != string::npos, "failing: and the message (got '" + seen.message + "')");
+      } else {
+         require(seen.status == DBResultSetStatus::Done, "plain: Done");
+         require(seen.code == 0 && seen.message.empty(), "plain: no error");
+      }
+   }
+}
+
+void TestSQLiteFoundation::test_accessors_by_name_and_by_index_agree() {
+   TEST_CASE("test_accessors_by_name_and_by_index_agree");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("accessors.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table kinds(i integer, r real, t text, b blob, n integer)"), "create");
+   require(exec(db, "insert into kinds(i, r, t, b, n) values (7, 1.5, 'txt', x'0102', null)"), "one row of every kind");
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select i, r, t, b, n from kinds"));
+   require(rs && rs->next(), "the row");
+
+   // column 0 'i', 1 'r', 2 't', 3 'b', 4 'n' (NULL)
+   requireLongEquals(0, rs->columnIndexForName("i"), "index of i");
+   requireLongEquals(3, rs->columnIndexForName("B"), "index of B (names are not case sensitive)");
+   requireLongEquals(-1, rs->columnIndexForName("nope"), "a missing name is -1");
+
+   // by name and by index give the same answer
+   requireLongEquals(7, rs->intForColumn("i"), "intForColumn");
+   requireLongEquals(7, rs->intForColumnIndex(0), "intForColumnIndex");
+   require(rs->int64ForColumn("I") == 7 && rs->int64ForColumnIndex(0) == 7, "int64");
+   require(rs->longForColumn("i") == 7 && rs->longForColumnIndex(0) == 7, "long");
+   require(rs->boolForColumn("i") && rs->boolForColumnIndex(0), "bool, true");
+   require(!rs->boolForColumn("n") && !rs->boolForColumnIndex(4), "bool, NULL is false");
+   requireDoubleEquals(1.5, rs->doubleForColumn("r"), "doubleForColumn");
+   requireDoubleEquals(1.5, rs->doubleForColumnIndex(1), "doubleForColumnIndex");
+   {
+      int a = -1, b = -1;
+      require(rs->intForColumn("i", a) && rs->intForColumnIndex(0, b) && a == 7 && b == 7, "intForColumn with a value");
+      require(!rs->intForColumn("r", a) && a == 0, "a REAL is refused (value 0)");
+      require(!rs->intForColumnIndex(4, b) && b == 0, "NULL is refused (value 0)");
+   }
+   {
+      unique_ptr<string> byName(rs->stringForColumn("t"));
+      unique_ptr<string> byIndex(rs->stringForColumnIndex(2));
+      require(byName && byIndex && *byName == "txt" && *byIndex == "txt", "stringForColumn, pointer");
+      string a, b;
+      require(rs->stringForColumn("t", a) && rs->stringForColumnIndex(2, b) && a == "txt" && b == "txt", "stringForColumn, reference");
+      require(rs->stringForColumnIndex(4) == nullptr, "a NULL text is nullptr");
+   }
+   {
+      unique_ptr<DBData> byName(rs->dataForColumn("b"));
+      unique_ptr<DBData> byIndex(rs->dataForColumnIndex(3));
+      require(byName && byIndex && byName->length() == 2 && byIndex->length() == 2, "the blob, by name and by index");
+      require(rs->dataForColumn("n") == nullptr && rs->dataForColumnIndex(4) == nullptr, "a NULL blob is nullptr");
+      unique_ptr<DBDate> date(rs->dateForColumn("r"));
+      unique_ptr<DBDate> dateByIndex(rs->dateForColumnIndex(1));
+      require(date && dateByIndex, "a date from a REAL");
+      require(rs->dateForColumn("n") == nullptr && rs->dateForColumnIndex(4) == nullptr, "a NULL date is nullptr");
+   }
+   requireLongEquals(5, rs->getColumnCount(), "five columns");
+   require(rs->getTypeForColumnIndex(0) == ValueTypeInteger && rs->getTypeForColumnIndex(1) == ValueTypeFloat &&
+           rs->getTypeForColumnIndex(2) == ValueTypeText && rs->getTypeForColumnIndex(3) == ValueTypeBlob &&
+           rs->getTypeForColumnIndex(4) == ValueTypeNull, "the types");
+
+   // a name that is not there: the answer is the answer for a NULL column
+   requireLongEquals(0, rs->intForColumn("nope"), "int, missing name");
+   require(rs->int64ForColumn("nope") == 0 && rs->longForColumn("nope") == 0, "int64 and long, missing name");
+   require(!rs->boolForColumn("nope"), "bool, missing name is false");
+   requireDoubleEquals(0.0, rs->doubleForColumn("nope"), "double, missing name");
+   {
+      int v = 5;
+      require(!rs->intForColumn("nope", v) && v == 0, "int with a value, missing name");
+      string s = "kept?";
+      require(!rs->stringForColumn("nope", s) && s.empty(), "string with a value, missing name: false and empty");
+   }
+   require(rs->stringForColumn("nope") == nullptr, "string pointer, missing name");
+   require(rs->dateForColumn("nope") == nullptr && rs->dataForColumn("nope") == nullptr, "date and data, missing name");
+
+   // once the result set has ended there is no row: the same defaults
+   rs->close();
+   require(rs->intForColumn("i") == 0 && rs->intForColumnIndex(0) == 0 && !rs->boolForColumn("i"), "after close(): 0 and false");
+   require(rs->stringForColumn("t") == nullptr && rs->stringForColumnIndex(2) == nullptr, "after close(): no string");
+   require(rs->dataForColumn("b") == nullptr && rs->dateForColumn("r") == nullptr, "after close(): no data, no date");
+   requireLongEquals(0, rs->getColumnCount(), "after close(): no columns");
 }

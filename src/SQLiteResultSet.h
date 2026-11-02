@@ -1,6 +1,7 @@
 #ifndef CHAPEAU_SQLITERESULTSET_H
 #define CHAPEAU_SQLITERESULTSET_H
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <map>
@@ -114,7 +115,13 @@ public:
    void close();
 
    /**
-    * @return the status of this result set (see the class comment)
+    * @return the status of this result set (see the class comment). Reading it
+    * is not a data race, also while the thread that has the result set steps or
+    * closes it: it is an atomic load. When the status read is Done, Error or
+    * Invalidated, lastErrorCode() and lastErrorMessage() hold what went with
+    * it and may be read; before that, they may not. This is all that is safe to
+    * do to a result set from another thread: next(), close(), the column
+    * accessors and destruction are for the thread that has the unit.
     */
    DBResultSetStatus status() const;
 
@@ -371,6 +378,24 @@ private:
 
    bool isFinished() const;
 
+   // The public methods above are entry points; each does its work in the
+   // '...Internal' method of the same name, and the library's own code (the
+   // destructor, the name-based accessors, SQLiteDatabase) calls only these,
+   // never a public method, so that a guard taken once in a public method is
+   // not reached again through it. They have the same behavior as the public
+   // methods; none of them takes any lock.
+   void closeInternal();
+   int columnIndexForNameInternal(const std::string& columnName) const;
+   int intForColumnIndexInternal(int columnIdx) const;
+   bool intForColumnIndexInternal(int columnIdx, int& value) const;
+   std::int64_t int64ForColumnIndexInternal(int columnIdx) const;
+   long longForColumnIndexInternal(int columnIdx) const;
+   double doubleForColumnIndexInternal(int columnIdx) const;
+   std::string* stringForColumnIndexInternal(int columnIdx) const;
+   bool stringForColumnIndexInternal(int columnIdx, std::string& columnValue) const;
+   DBDate* dateForColumnIndexInternal(int columnIdx) const;
+   DBData* dataForColumnIndexInternal(int columnIdx) const;
+
    // the sqlite3 statement to read from, or nullptr if there is none
    sqlite3_stmt* sqliteStatement() const;
 
@@ -378,7 +403,15 @@ private:
    SQLiteStatement* m_statement;
    mutable std::map<std::string, int> m_columnNameToIndexMap;
    mutable bool m_columnNamesSetup;
-   DBResultSetStatus m_status;
+
+   // Atomic so that status() can be read from another thread without a data
+   // race. The final state is published in two steps that must stay in this
+   // order: the code and the message are written first, then the status is
+   // stored with release semantics, so a reader that loads the status with
+   // acquire semantics and sees Done, Error or Invalidated also sees the code and
+   // the message that went with it. The code and the message are plain fields:
+   // they are meant to be read only after such a final status has been seen.
+   std::atomic<DBResultSetStatus> m_status;
    int m_errorCode;
    std::string m_errorMessage;
 

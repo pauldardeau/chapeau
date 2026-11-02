@@ -54,7 +54,7 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
 //******************************************************************************
 
 SQLiteResultSet::~SQLiteResultSet() {
-   close();
+   closeInternal();
    releaseStatement();
 
    if (m_parentDB != nullptr) {
@@ -87,9 +87,10 @@ void SQLiteResultSet::releaseStatement() {
 //******************************************************************************
 
 bool SQLiteResultSet::isFinished() const {
-   return m_status == DBResultSetStatus::Done ||
-          m_status == DBResultSetStatus::Error ||
-          m_status == DBResultSetStatus::Invalidated;
+   const DBResultSetStatus status = m_status.load(std::memory_order_acquire);
+   return status == DBResultSetStatus::Done ||
+          status == DBResultSetStatus::Error ||
+          status == DBResultSetStatus::Invalidated;
 }
 
 //******************************************************************************
@@ -99,30 +100,39 @@ void SQLiteResultSet::finish(DBResultSetStatus finalStatus,
                              const std::string& errorMessage) {
    // the first final state is the one that stays
    if (!isFinished()) {
-      m_status = finalStatus;
+      // the code and the message first, the status last and with release
+      // semantics: whoever sees the final status also sees them (see m_status)
       m_errorCode = errorCode;
       m_errorMessage = errorMessage;
+      m_status.store(finalStatus, std::memory_order_release);
    }
 
    // ends the iteration for good: once the statement is released there is
    // nothing left to step, so next() stays false and the query cannot restart
    releaseStatement();
 
-   if (m_parentDB != nullptr) {
-      m_parentDB->setInUse(false);
-   }
+   // (This used to end with m_parentDB->setInUse(false). A cursor ending is not
+   // an operation of the database's, and it cleared the in-use marker of
+   // whatever call of the database was running at the time. The marker is now
+   // set and cleared only by the database call that owns it.)
 }
 
 //******************************************************************************
 
 void SQLiteResultSet::close() {
+   closeInternal();
+}
+
+//******************************************************************************
+
+void SQLiteResultSet::closeInternal() {
    finish(DBResultSetStatus::Done, 0);
 }
 
 //******************************************************************************
 
 DBResultSetStatus SQLiteResultSet::status() const {
-   return m_status;
+   return m_status.load(std::memory_order_acquire);
 }
 
 //******************************************************************************
@@ -144,9 +154,9 @@ void SQLiteResultSet::invalidate() {
    // result set out of its own list, and must not be called back. A result
    // set that had already ended keeps the state it ended in.
    if (!isFinished()) {
-      m_status = DBResultSetStatus::Invalidated;
       m_errorCode = 0;
       m_errorMessage.clear();
+      m_status.store(DBResultSetStatus::Invalidated, std::memory_order_release);
    }
    releaseStatement();
    m_parentDB = nullptr;
@@ -233,7 +243,19 @@ bool SQLiteResultSet::advance(const char* operation) {
 
 //******************************************************************************
 
+// Every public accessor below does its work in a private '...Internal' twin and
+// nothing else. The name-based accessors, and the ones defined in terms of
+// another (boolFor* in terms of int64For*), call the Internal twins and never a
+// public method, so that a future entry-point guard can be taken once, in the
+// public method, without the method reaching it again through itself.
+
 int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
+   return columnIndexForNameInternal(columnName);
+}
+
+//******************************************************************************
+
+int SQLiteResultSet::columnIndexForNameInternal(const std::string& columnName) const {
    if (!m_columnNamesSetup) {
       setupColumnNames();
    }
@@ -258,18 +280,24 @@ int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
 //******************************************************************************
 
 int SQLiteResultSet::intForColumn(const std::string& columnName) const {
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return 0;
    }
 
-   return intForColumnIndex(columnIdx);
+   return intForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 int SQLiteResultSet::intForColumnIndex(int columnIdx) const {
+   return intForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+int SQLiteResultSet::intForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
@@ -284,18 +312,24 @@ int SQLiteResultSet::intForColumnIndex(int columnIdx) const {
 //******************************************************************************
 
 std::int64_t SQLiteResultSet::int64ForColumn(const std::string& columnName) const {
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return 0;
    }
 
-   return int64ForColumnIndex(columnIdx);
+   return int64ForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 std::int64_t SQLiteResultSet::int64ForColumnIndex(int columnIdx) const {
+   return int64ForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+std::int64_t SQLiteResultSet::int64ForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
@@ -308,19 +342,25 @@ std::int64_t SQLiteResultSet::int64ForColumnIndex(int columnIdx) const {
 
 bool SQLiteResultSet::intForColumn(const std::string& columnName,
                                    int& value) const {
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       value = 0;
       return false;
    }
 
-   return intForColumnIndex(columnIdx, value);
+   return intForColumnIndexInternal(columnIdx, value);
 }
 
 //******************************************************************************
 
 bool SQLiteResultSet::intForColumnIndex(int columnIdx, int& value) const {
+   return intForColumnIndexInternal(columnIdx, value);
+}
+
+//******************************************************************************
+
+bool SQLiteResultSet::intForColumnIndexInternal(int columnIdx, int& value) const {
    value = 0;
 
    sqlite3_stmt* const stmt = sqliteStatement();
@@ -346,27 +386,24 @@ bool SQLiteResultSet::intForColumnIndex(int columnIdx, int& value) const {
 //******************************************************************************
 
 long SQLiteResultSet::longForColumn(const std::string& columnName) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return 0;
    }
 
-   sqlite3_stmt* const stmt = sqliteStatement();
-   if (stmt == nullptr) {
-      return 0;
-   }
-
-   return (long)sqlite3_column_int64(stmt, columnIdx);
+   return longForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
+   return longForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+long SQLiteResultSet::longForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
@@ -378,39 +415,42 @@ long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
 //******************************************************************************
 
 bool SQLiteResultSet::boolForColumn(const std::string& columnName) const {
-   return (int64ForColumn(columnName) != 0);
+   const int columnIdx = columnIndexForNameInternal(columnName);
+
+   if (columnIdx == -1) {
+      return false;
+   }
+
+   return (int64ForColumnIndexInternal(columnIdx) != 0);
 }
 
 //******************************************************************************
 
 bool SQLiteResultSet::boolForColumnIndex(int columnIdx) const {
-   return (int64ForColumnIndex(columnIdx) != 0);
+   return (int64ForColumnIndexInternal(columnIdx) != 0);
 }
 
 //******************************************************************************
 
 double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return 0;
    }
 
-   sqlite3_stmt* const stmt = sqliteStatement();
-   if (stmt == nullptr) {
-      return 0;
-   }
-
-   return sqlite3_column_double(stmt, columnIdx);
+   return doubleForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 double SQLiteResultSet::doubleForColumnIndex(int columnIdx) const {
+   return doubleForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+double SQLiteResultSet::doubleForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
@@ -422,6 +462,12 @@ double SQLiteResultSet::doubleForColumnIndex(int columnIdx) const {
 //******************************************************************************
 
 std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
+   return stringForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+std::string* SQLiteResultSet::stringForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return nullptr;
@@ -439,34 +485,26 @@ std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
 //******************************************************************************
 
 std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return nullptr;
    }
 
-   return stringForColumnIndex(columnIdx);
+   return stringForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 bool SQLiteResultSet::stringForColumn(const std::string& columnName,
                                       std::string& columnValue) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       columnValue = "";
       return false;
    } else {
-      return stringForColumnIndex(columnIdx, columnValue);
+      return stringForColumnIndexInternal(columnIdx, columnValue);
    }
 }
 
@@ -474,6 +512,13 @@ bool SQLiteResultSet::stringForColumn(const std::string& columnName,
 
 bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
                                            std::string& columnValue) const {
+   return stringForColumnIndexInternal(columnIdx, columnValue);
+}
+
+//******************************************************************************
+
+bool SQLiteResultSet::stringForColumnIndexInternal(int columnIdx,
+                                                   std::string& columnValue) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       columnValue = "";
@@ -494,22 +539,24 @@ bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
 //******************************************************************************
 
 DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return nullptr;
    }
 
-   return dateForColumnIndex(columnIdx);
+   return dateForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 DBDate* SQLiteResultSet::dateForColumnIndex(int columnIdx) const {
+   return dateForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+DBDate* SQLiteResultSet::dateForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
 
    // SQL NULL is no date, which is not the same as the Unix epoch
@@ -523,22 +570,24 @@ DBDate* SQLiteResultSet::dateForColumnIndex(int columnIdx) const {
 //******************************************************************************
 
 DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
-   if (!m_columnNamesSetup) {
-      setupColumnNames();
-   }
-
-   const int columnIdx = columnIndexForName(columnName);
+   const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
       return nullptr;
    }
 
-   return dataForColumnIndex(columnIdx);
+   return dataForColumnIndexInternal(columnIdx);
 }
 
 //******************************************************************************
 
 DBData* SQLiteResultSet::dataForColumnIndex(int columnIdx) const {
+   return dataForColumnIndexInternal(columnIdx);
+}
+
+//******************************************************************************
+
+DBData* SQLiteResultSet::dataForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
 
    // SQL NULL is no blob, which is not the same as a zero-length blob

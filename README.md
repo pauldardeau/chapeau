@@ -222,9 +222,10 @@ What this does **not** mean:
 - SQLite's serialized mode (`sqlite3_threadsafe() == 1`) does not make
   Chapeau thread safe. It protects SQLite's connection object, not the state
   Chapeau keeps around it.
-- The `inUse()` marker is not a lock. It is a plain `bool` that catches a call
-  made from inside another call on the same thread; it is not atomic and
-  cannot be relied on to notice, or to survive, a second thread.
+- The `inUse()` marker is not a lock. It is a flag that catches a call made
+  from inside another call on the same thread; reading it is not a data race,
+  but it does not wait and cannot be relied on to notice, or to survive, a
+  second thread.
 - Nothing enforces thread confinement yet; it is the caller's responsibility.
   Defensive checks may be added later (they would be additions: the rules
   above are the contract either way).

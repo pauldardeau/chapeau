@@ -1,6 +1,7 @@
 #ifndef CHAPEAU_DATABASE_H
 #define CHAPEAU_DATABASE_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace chapeau {
 
@@ -145,10 +147,20 @@ const char* dbErrorKindName(DBErrorKind kind);
  *    nothing for Chapeau's state around it, which is the part the rules above
  *    are about.
  *  - The in-use marker (SQLiteDatabase::inUse(), DBErrorKind::InUse) is not a
- *    lock. It is a plain bool that catches a call made from inside another
- *    call of the same database (re-entrance on one thread). It is not atomic,
- *    does not wait, and is not a reliable detector of two threads: do not
- *    depend on it to find, or to survive, a violation.
+ *    lock. It is a flag that catches a call made from inside another call of
+ *    the same database (re-entrance on one thread). Reading it is not a data
+ *    race (it is atomic), but it does not wait, is set only by some of the
+ *    database's calls (executeQuery, executeUpdate, lastInsertRowId; not
+ *    next(), close() or open()), and is not a reliable detector of two threads:
+ *    do not depend on it to find, or to survive, a violation.
+ *  - What is safe on its own, without a unit: reading or setting a single
+ *    setting (the logging, crash, trace and checked-out flags, the busy timeout
+ *    of a database that is not open), reading statementCacheLimit() and
+ *    shouldCacheStatements(), reading the error snapshot (each of the three
+ *    getters returns a value that was published whole), and reading a result
+ *    set's status() and, once that is final, its error. Nothing else is: the
+ *    statement cache, the set of result sets, the statements and the
+ *    connection are only for the one thread that has the unit.
  *  - Nothing in Chapeau enforces confinement. Keeping to the rules is the
  *    caller's responsibility. A later version may check some of them
  *    defensively; what is documented here is the contract either way.
@@ -605,7 +617,14 @@ public:
     * The code is the database's own result code (for SQLite, the result of the
     * failed call) where there is one, and 0 for a failure that did not come
     * from the database. A subclass that does not keep track reports None.
-    * Not thread safe: a database is used by one thread at a time.
+    * The three values are kept as one record behind a mutex of their own, so
+    * reading or replacing the record never tears it (a message is never half of
+    * one failure and half of another). That is all it guarantees: each of the
+    * three getters locks separately, so a caller who reads all three while
+    * another thread runs operations on the database may still get the parts of
+    * different records, and the contract of the class (see above) is unchanged: a
+    * database is used by one thread at a time, and the error is read before
+    * the next operation replaces it.
     * @return the kind of the last failure
     */
    virtual DBErrorKind lastErrorKind() const;
@@ -634,6 +653,24 @@ protected:
    void clearLastError();
 
    /**
+    * The last error as one record: kind, code and message are those of one
+    * failure (or of none), whatever other threads are recording meanwhile. For
+    * subclasses.
+    */
+   struct LastError {
+      DBErrorKind kind;
+      int code;
+      std::string message;
+   };
+   LastError lastErrorRecord() const;
+
+   // The cache operations that the library's own code uses. The public
+   // cachedStatementForQuery() and clearCachedStatements() do their work here
+   // and nothing else, and SQLiteDatabase calls these, never the public ones.
+   DBStatement* cachedStatementForQueryInternal(const std::string& query);
+   void clearCachedStatementsInternal();
+
+   /**
     * Called by clearCachedStatements() for each statement removed from the
     * cache. The default closes and deletes it; a subclass whose statements
     * can still be in use (by a live result set) overrides this to keep such
@@ -656,13 +693,19 @@ private:
 
    std::map<std::string, CacheEntry> m_cachedStatements;
    std::list<std::string> m_cacheOrder;
-   std::size_t m_statementCacheLimit;
-   bool m_shouldCacheStatements;
 
-   // the last error (see lastErrorKind())
-   DBErrorKind m_lastErrorKind;
-   int m_lastErrorCode;
-   std::string m_lastErrorMessage;
+   // The two settings of the cache are atomic so that statementCacheLimit() and
+   // shouldCacheStatements() can be read without a data race while a setter
+   // runs. That is all it is for: the setters also empty or trim the cache, and
+   // the maps and lists above are NOT protected by it.
+   std::atomic<std::size_t> m_statementCacheLimit;
+   std::atomic<bool> m_shouldCacheStatements;
+
+   // the last error (see lastErrorKind()): one record and the leaf mutex that
+   // guards it. The mutex is held only while the record is copied or replaced,
+   // never while calling SQLite, a callback, the logger or anything else.
+   mutable std::mutex m_lastErrorMutex;
+   LastError m_lastError;
 
 };
 

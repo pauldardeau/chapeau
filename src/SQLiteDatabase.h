@@ -1,6 +1,7 @@
 #ifndef CHAPEAU_SQLITEDATABASE_H
 #define CHAPEAU_SQLITEDATABASE_H
 
+#include <atomic>
 #include <string>
 #include <map>
 #include <set>
@@ -36,11 +37,12 @@ class DBData;
  * What this class adds to them:
  *  - sqliteHandle() is part of the unit. Using the handle while another thread
  *    uses the database is a violation like any other.
- *  - inUse() / the in-use marker is not a lock. It is a plain bool, set while
- *    one of this database's calls runs and cleared when it returns or when the
- *    result set it covers ends; it only catches a re-entrant call on the same
- *    thread (DBErrorKind::InUse). Another thread cannot rely on seeing it, and
- *    it is not atomic.
+ *  - inUse() / the in-use marker is not a lock. It is a flag, set while one of
+ *    executeQuery(), executeUpdate() or lastInsertRowId() runs and cleared when
+ *    that call returns, and by nothing else (a result set ending no longer
+ *    clears it); it only catches a re-entrant call on the same thread
+ *    (DBErrorKind::InUse). It is atomic, so reading it is not a data race, but
+ *    another thread cannot rely on seeing it.
  *  - SQLite's serialized mode makes the sqlite3* connection safe to call from
  *    several threads. It does not protect the statement cache, the set of live
  *    result sets, the error snapshot or the cursor counts kept here.
@@ -338,6 +340,23 @@ private:
    // uses it. slotTaken is set when there is one that is in use.
    SQLiteStatement* idleCachedStatement(const std::string& sql, bool& slotTaken);
 
+   // The public operations above are entry points; each does its work in the
+   // '...Internal' method of the same name, and the library's own code (the
+   // destructor, the transaction helpers, goodConnection(), inUse()) calls only
+   // these, never a public method, so that a guard taken once in a public
+   // method is not reached again through it. Same behavior as the public
+   // methods; none of them takes a lock or refuses a call.
+   DBResultSet* executeQueryInternal(const std::string& sql);
+   DBResultSet* executeQueryInternal(const std::string& sql,
+                                     const DBStatementArgs& args);
+   bool executeUpdateInternal(const std::string& sql,
+                              unsigned long& rowsAffectedCount);
+   bool executeUpdateInternal(const std::string& sql,
+                              const DBStatementArgs& args,
+                              unsigned long& rowsAffectedCount);
+   void closeInternal();
+   bool inTransactionInternal();
+
    void registerCursor(SQLiteResultSet* resultSet);
    void unregisterCursor(SQLiteResultSet* resultSet);
    void invalidateCursors();
@@ -346,12 +365,20 @@ private:
 
    sqlite3*    m_db;
    std::string m_databasePath;
-   bool        m_logsErrors;
-   bool        m_crashOnErrors;
-   bool        m_inUse;
-   bool        m_traceExecution;
-   bool        m_checkedOut;
-   int         m_busyRetryTimeout;
+   // Plain settings that are read by the operations and by the getters, and set
+   // by the setters. They are atomic so that reading or setting one of them
+   // is never a data race with another thread doing the same to it (a monitoring
+   // thread toggling logging or the checked-out flag, say). Nothing more is
+   // claimed: they do not make an operation that reads them safe to overlap
+   // with another, and the setter of the busy timeout also calls SQLite on the
+   // connection, which no atomic covers.
+   std::atomic<bool> m_logsErrors;
+   std::atomic<bool> m_crashOnErrors;
+   // the in-use marker is a flag, not a lock: see the class comment
+   std::atomic<bool> m_inUse;
+   std::atomic<bool> m_traceExecution;
+   std::atomic<bool> m_checkedOut;
+   std::atomic<int>  m_busyRetryTimeout;
 
    SQLiteDatabase();
    SQLiteDatabase(const SQLiteDatabase&);

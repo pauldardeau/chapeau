@@ -55,8 +55,8 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
 //******************************************************************************
 
 SQLiteDatabase::~SQLiteDatabase() {
-   // close() invalidates the live result sets, then empties the cache
-   close();
+   // closing invalidates the live result sets, then empties the cache
+   closeInternal();
 }
 
 //******************************************************************************
@@ -451,7 +451,7 @@ SQLiteStatement* SQLiteDatabase::idleCachedStatement(const std::string& sql,
    slotTaken = false;
 
    SQLiteStatement* statement =
-      dynamic_cast<SQLiteStatement*>(cachedStatementForQuery(sql));
+      dynamic_cast<SQLiteStatement*>(cachedStatementForQueryInternal(sql));
 
    if (statement != nullptr && statement->cursorCount() > 0) {
       // an active result set owns this statement's execution state: running
@@ -492,12 +492,18 @@ void SQLiteDatabase::discardCachedStatement(DBStatement* statement) {
 //******************************************************************************
 
 void SQLiteDatabase::close() {
+   closeInternal();
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::closeInternal() {
    clearLastError();
 
    // live result sets give up their statements first, so that every
    // statement can be finalized and the connection actually closes
    invalidateCursors();
-   clearCachedStatements();
+   clearCachedStatementsInternal();
 
    if (!m_db) {
       return;
@@ -534,12 +540,13 @@ bool SQLiteDatabase::goodConnection() {
    }
 
    // executeQuery() starts by clearing the error and records its own failure,
-   // which is then this one
+   // which is then this one. The query is the whole of the database's part of
+   // this call; the result set is let go of after it, as a separate step.
    DBResultSet* rs =
-      executeQuery("select name from sqlite_master where type='table'");
+      executeQueryInternal("select name from sqlite_master where type='table'");
 
    if (rs != nullptr) {
-      rs->close();
+      static_cast<SQLiteResultSet*>(rs)->closeInternal();
       delete rs;
       return true;
    }
@@ -703,6 +710,12 @@ bool SQLiteDatabase::bindString(const std::string& value,
 //******************************************************************************
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
+   return executeQueryInternal(sql);
+}
+
+//******************************************************************************
+
+DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql) {
    clearLastError();
 
    if (nullptr == m_db) {
@@ -774,6 +787,13 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                                           const DBStatementArgs& args) {
+   return executeQueryInternal(sql, args);
+}
+
+//******************************************************************************
+
+DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql,
+                                                  const DBStatementArgs& args) {
    clearLastError();
 
    if (nullptr == m_db) {
@@ -868,6 +888,13 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    unsigned long& rowsAffectedCount) {
+   return executeUpdateInternal(sql, rowsAffectedCount);
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::executeUpdateInternal(const std::string& sql,
+                                           unsigned long& rowsAffectedCount) {
    clearLastError();
 
    if (nullptr == m_db) {
@@ -986,6 +1013,14 @@ bool SQLiteDatabase::executeUpdate(const std::string& sql,
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    const DBStatementArgs& args,
                                    unsigned long& affectedRowsCount) {
+   return executeUpdateInternal(sql, args, affectedRowsCount);
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::executeUpdateInternal(const std::string& sql,
+                                           const DBStatementArgs& args,
+                                           unsigned long& affectedRowsCount) {
    clearLastError();
 
    if (nullptr == m_db) {
@@ -1138,7 +1173,7 @@ bool SQLiteDatabase::rollback() {
    unsigned long rowsAffectedCount = 0L;
    // whether a transaction is open afterwards is SQLite's to say, see
    // inTransaction()
-   return executeUpdate("ROLLBACK TRANSACTION;", rowsAffectedCount);
+   return executeUpdateInternal("ROLLBACK TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
@@ -1147,21 +1182,21 @@ bool SQLiteDatabase::commit() {
    unsigned long rowsAffectedCount = 0L;
    // whether a transaction is open afterwards is SQLite's to say, see
    // inTransaction()
-   return executeUpdate("COMMIT TRANSACTION;", rowsAffectedCount);
+   return executeUpdateInternal("COMMIT TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::beginDeferredTransaction() {
    unsigned long rowsAffectedCount = 0L;
-   return executeUpdate("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
+   return executeUpdateInternal("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
 
 bool SQLiteDatabase::beginTransaction() {
    unsigned long rowsAffectedCount = 0L;
-   return executeUpdate("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
+   return executeUpdateInternal("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
 }
 
 //******************************************************************************
@@ -1191,7 +1226,7 @@ void SQLiteDatabase::setCrashOnErrors(bool flag) {
 //******************************************************************************
 
 bool SQLiteDatabase::inUse() {
-   return m_inUse || inTransaction();
+   return m_inUse || inTransactionInternal();
 }
 
 //******************************************************************************
@@ -1203,6 +1238,12 @@ void SQLiteDatabase::setInUse(bool b) {
 //******************************************************************************
 
 bool SQLiteDatabase::inTransaction() {
+   return inTransactionInternal();
+}
+
+//******************************************************************************
+
+bool SQLiteDatabase::inTransactionInternal() {
    // SQLite knows: it is in autocommit mode exactly when no transaction is
    // open, however the transaction was begun or ended (a BEGIN or COMMIT run
    // as plain SQL, a COMMIT that failed busy and left it open, or a

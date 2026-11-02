@@ -21,8 +21,7 @@ using namespace chapeau;
 Database::Database() :
    m_statementCacheLimit(DEFAULT_STATEMENT_CACHE_LIMIT),
    m_shouldCacheStatements(true),
-   m_lastErrorKind(DBErrorKind::None),
-   m_lastErrorCode(0) {
+   m_lastError{DBErrorKind::None, 0, std::string()} {
 }
 
 //******************************************************************************
@@ -164,8 +163,8 @@ bool Database::shouldCacheStatements() const {
 void Database::setShouldCacheStatements(bool value) {
    m_shouldCacheStatements = value;
 
-   if (!m_shouldCacheStatements) {
-      clearCachedStatements();
+   if (!value) {
+      clearCachedStatementsInternal();
    }
 }
 
@@ -181,7 +180,7 @@ void Database::setStatementCacheLimit(std::size_t limit) {
    m_statementCacheLimit = limit;
 
    if (limit == 0) {
-      clearCachedStatements();
+      clearCachedStatementsInternal();
    } else {
       evictLeastRecentlyUsed(limit);
    }
@@ -190,6 +189,12 @@ void Database::setStatementCacheLimit(std::size_t limit) {
 //******************************************************************************
 
 DBStatement* Database::cachedStatementForQuery(const std::string& query) {
+   return cachedStatementForQueryInternal(query);
+}
+
+//******************************************************************************
+
+DBStatement* Database::cachedStatementForQueryInternal(const std::string& query) {
    const auto it = m_cachedStatements.find(query);
    if (it == m_cachedStatements.end()) {
       return nullptr;
@@ -225,7 +230,7 @@ void Database::setCachedStatement(DBStatement* statement,
 
    // the statement just added is the most recently used and is never the one
    // evicted, so the cache keeps at least it
-   evictLeastRecentlyUsed(m_statementCacheLimit > 0 ? m_statementCacheLimit : 1);
+   evictLeastRecentlyUsed(m_statementCacheLimit.load() > 0 ? m_statementCacheLimit.load() : std::size_t(1));
 }
 
 //******************************************************************************
@@ -249,6 +254,12 @@ void Database::evictLeastRecentlyUsed(std::size_t keep) {
 //******************************************************************************
 
 void Database::clearCachedStatements() {
+   clearCachedStatementsInternal();
+}
+
+//******************************************************************************
+
+void Database::clearCachedStatementsInternal() {
    // empty the cache first, so that nothing handed to
    // discardCachedStatement() is still reachable through it
    std::map<std::string, CacheEntry> cached;
@@ -270,19 +281,30 @@ void Database::discardCachedStatement(DBStatement* statement) {
 //******************************************************************************
 
 DBErrorKind Database::lastErrorKind() const {
-   return m_lastErrorKind;
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   return m_lastError.kind;
 }
 
 //******************************************************************************
 
 int Database::lastErrorCode() const {
-   return m_lastErrorCode;
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   return m_lastError.code;
 }
 
 //******************************************************************************
 
 std::string Database::lastErrorMessage() const {
-   return m_lastErrorMessage;
+   // the copy is made under the lock, the caller gets its own string
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   return m_lastError.message;
+}
+
+//******************************************************************************
+
+Database::LastError Database::lastErrorRecord() const {
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   return m_lastError;
 }
 
 //******************************************************************************
@@ -290,17 +312,19 @@ std::string Database::lastErrorMessage() const {
 void Database::setLastError(DBErrorKind kind,
                             int code,
                             const std::string& message) {
-   m_lastErrorKind = kind;
-   m_lastErrorCode = code;
-   m_lastErrorMessage = message;
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   m_lastError.kind = kind;
+   m_lastError.code = code;
+   m_lastError.message = message;
 }
 
 //******************************************************************************
 
 void Database::clearLastError() {
-   m_lastErrorKind = DBErrorKind::None;
-   m_lastErrorCode = 0;
-   m_lastErrorMessage.clear();
+   std::lock_guard<std::mutex> lock(m_lastErrorMutex);
+   m_lastError.kind = DBErrorKind::None;
+   m_lastError.code = 0;
+   m_lastError.message.clear();
 }
 
 //******************************************************************************

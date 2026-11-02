@@ -120,6 +120,16 @@ protected:
    void test_statement_boundary_with_transactions_and_cursors();
    void test_error_kind_names();
    void test_open_with_a_threadsafe_library();
+   void test_public_and_internal_call_sequences();
+   void test_cache_operations_after_separation();
+   void test_cursor_destruction_paths();
+   void test_error_snapshot_rules_unchanged();
+   void test_cursor_status_transitions_unchanged();
+   void test_inuse_marker_survives_a_cursor_ending();
+   void test_error_snapshot_is_published_as_one_record();
+   void test_settings_can_be_read_while_they_are_set();
+   void test_cursor_status_can_be_observed_from_another_thread();
+   void test_accessors_by_name_and_by_index_agree();
 
    void requireLongEquals(long long expected,
                           long long actual,
