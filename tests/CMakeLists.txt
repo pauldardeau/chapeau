@@ -10,6 +10,7 @@ add_executable(test_chapeau
    test_sqlite_foundation.cpp
    test_sqlite_result_set.cpp
    test_sqlite_statement.cpp
+   test_unit_state.cpp
    tests.cpp
 )
 

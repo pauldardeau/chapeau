@@ -7,6 +7,7 @@ add_library(chapeau
    DBStatementArgs.cpp
    SQLiteDatabase.cpp
    SQLiteResultSet.cpp
+   UnitState.cpp
 )
 
 target_compile_features(chapeau PUBLIC cxx_std_20)
@@ -47,6 +48,8 @@ install(TARGETS chapeau
 )
 
 file(GLOB CHAPEAU_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
+# UnitState.h is internal: Database.h and SQLiteResultSet.h only forward-declare UnitState
+list(FILTER CHAPEAU_HEADERS EXCLUDE REGEX "/UnitState\\.h$")
 install(FILES ${CHAPEAU_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/chapeau)
 
 # the query demo executable

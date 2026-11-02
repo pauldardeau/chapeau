@@ -25,6 +25,7 @@ class DBData;
 class DBStatement;
 class DBStatementArgs;
 class DBResultSet;
+class UnitState;   // internal: see UnitState.h
 
 
 enum DBValueType {
@@ -640,6 +641,33 @@ public:
     */
    virtual std::string lastErrorMessage() const;
 
+   /**
+    * How many calls the CALLING THREAD has had refused, over all databases in the
+    * process (a per-thread count, 0 for a thread that has had none). A call is
+    * refused when it is made on a unit (a database and its result sets) while
+    * another call on that unit is running; the refusal itself, and what a refused
+    * call returns, are for the milestone that activates the claims. Until then no
+    * call is ever refused and this is always 0.
+    *
+    * It is meant to be read before and after a stretch of code on one thread: a
+    * change means that a call made by this thread in between was refused, which
+    * the return value of that call (false, 0, nullptr, an empty string) cannot say
+    * on its own. It is kept per thread, so another thread's refusals never show
+    * up in it. It does not make concurrent use of a database safe or supported.
+    */
+   static std::uint64_t refusedCallsOnThisThread();
+
+   /**
+    * How many calls on this database's unit have been refused since it was
+    * created (a monotonically increasing count; it is never reset; it wraps
+    * around only after 2^64 refusals). It can be read at any time, from any
+    * thread, without any call being refused, and it counts the refusals of
+    * every thread: it does not say whose call was refused. Until the claims are
+    * activated no call is refused and it is always 0. It does not make
+    * concurrent use of a database safe or supported.
+    */
+   std::uint64_t refusedCalls() const;
+
 protected:
    /**
     * Records a failure as the last error (see lastErrorKind()), replacing the
@@ -663,6 +691,10 @@ protected:
       std::string message;
    };
    LastError lastErrorRecord() const;
+
+   // The unit state shared by this database and its result sets (internal, see
+   // UnitState.h). Never null.
+   std::shared_ptr<UnitState> unitState() const;
 
    // The cache operations that the library's own code uses. The public
    // cachedStatementForQuery() and clearCachedStatements() do their work here
@@ -706,6 +738,11 @@ private:
    // never while calling SQLite, a callback, the logger or anything else.
    mutable std::mutex m_lastErrorMutex;
    LastError m_lastError;
+
+   // shared with every result set of this database, so that it outlives the
+   // database for as long as any of them does
+   std::shared_ptr<UnitState> m_unit;
+   friend struct UnitStateAccess;
 
 };
 

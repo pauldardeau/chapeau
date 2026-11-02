@@ -1,6 +1,7 @@
 // Database.cpp
 
 #include "Database.h"
+#include "UnitState.h"
 #include <climits>
 #include <cstdint>
 #include "DBNull.h"
@@ -21,7 +22,8 @@ using namespace chapeau;
 Database::Database() :
    m_statementCacheLimit(DEFAULT_STATEMENT_CACHE_LIMIT),
    m_shouldCacheStatements(true),
-   m_lastError{DBErrorKind::None, 0, std::string()} {
+   m_lastError{DBErrorKind::None, 0, std::string()},
+   m_unit(std::make_shared<UnitState>()) {
 }
 
 //******************************************************************************
@@ -298,6 +300,24 @@ std::string Database::lastErrorMessage() const {
    // the copy is made under the lock, the caller gets its own string
    std::lock_guard<std::mutex> lock(m_lastErrorMutex);
    return m_lastError.message;
+}
+
+//******************************************************************************
+
+std::uint64_t Database::refusedCallsOnThisThread() {
+   return UnitState::refusedCallsOnThisThread();
+}
+
+//******************************************************************************
+
+std::uint64_t Database::refusedCalls() const {
+   return m_unit->refusedCalls();
+}
+
+//******************************************************************************
+
+std::shared_ptr<UnitState> Database::unitState() const {
+   return m_unit;
 }
 
 //******************************************************************************

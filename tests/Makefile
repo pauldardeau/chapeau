@@ -8,7 +8,8 @@ PROJ_OBJS = ../src/Database.o \
 ../src/DBDate.o \
 ../src/DBStatementArgs.o \
 ../src/SQLiteDatabase.o \
-../src/SQLiteResultSet.o
+../src/SQLiteResultSet.o \
+../src/UnitState.o
 
 POIVRE_OBJS = TestCase.o \
 TestSuite.o \
@@ -22,6 +23,7 @@ test_sqlite_database.o \
 test_sqlite_foundation.o \
 test_sqlite_result_set.o \
 test_sqlite_statement.o \
+test_unit_state.o \
 tests.o \
 $(POIVRE_OBJS)
 

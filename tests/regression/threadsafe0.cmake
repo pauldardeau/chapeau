@@ -74,7 +74,8 @@ set(ts0ChapeauSources
    DBDate.cpp
    DBStatementArgs.cpp
    SQLiteDatabase.cpp
-   SQLiteResultSet.cpp)
+   SQLiteResultSet.cpp
+   UnitState.cpp)
 list(TRANSFORM ts0ChapeauSources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/../../src/")
 
 # chapeau_add_pinned_sqlite_probe(<target> <source> <SQLITE_THREADSAFE value>)

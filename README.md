@@ -255,6 +255,15 @@ suite is run under ThreadSanitizer in CI (the `tsan` job). The same contract
 is written in the header comments of `Database.h`, `SQLiteDatabase.h` and
 `SQLiteResultSet.h`.
 
+**Refusal counters (infrastructure only).** `Database::refusedCalls()` (the
+calls refused on one database and its result sets) and
+`Database::refusedCallsOnThisThread()` (the calls refused to the calling thread,
+over all databases) exist so that a later version, which will refuse a call made
+while another call is running on the same database instead of racing, can say
+so. In this version nothing is refused, and both always return 0. They do not
+make concurrent use of a database safe or supported, and reading them is not a
+reason to share one.
+
 Testing
 -------
 Chapeau's test suite (`tests/`, built on poivre's `TestSuite`/`TEST_CASE`

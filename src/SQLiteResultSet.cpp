@@ -5,6 +5,7 @@
 
 #include "SQLiteResultSet.h"
 #include "SQLiteDatabase.h"
+#include "UnitState.h"
 #include "StrUtils.h"
 #include "DBData.h"
 #include "DBDate.h"
@@ -48,6 +49,7 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
    }
    if (m_parentDB != nullptr) {
       m_parentDB->registerCursor(this);
+      m_unit = m_parentDB->unitState();
    }
 }
 

@@ -14,6 +14,7 @@ namespace chapeau {
 
 class SQLiteDatabase;
 class SQLiteStatement;
+class UnitState;   // internal: see UnitState.h
 class Data;
 class Date;
 
@@ -400,6 +401,15 @@ private:
    sqlite3_stmt* sqliteStatement() const;
 
    SQLiteDatabase* m_parentDB;
+
+   // The unit state of the database this result set came from, shared with it and
+   // with that database's other result sets. Kept for as long as the result set
+   // lives, also after the database is closed or destroyed (the result set then
+   // still has the aggregate refusal count to report). Null only for a result set
+   // made without a database.
+   std::shared_ptr<UnitState> m_unit;
+   friend struct UnitStateAccess;
+
    SQLiteStatement* m_statement;
    mutable std::map<std::string, int> m_columnNameToIndexMap;
    mutable bool m_columnNamesSetup;

@@ -16,6 +16,7 @@
 #include "DBDate.h"
 #include "DBData.h"
 #include "Logger.h"
+#include "UnitState.h"
 
 
 using namespace chaudiere;
@@ -1209,6 +1210,9 @@ bool SQLiteDatabase::logsErrors() {
 
 void SQLiteDatabase::setLogsErrors(bool flag) {
    m_logsErrors = flag;
+   // the unit state is told too, so that a refusal made by a result set can be
+   // logged after this database is gone
+   unitState()->setLoggingEnabled(flag);
 }
 
 //******************************************************************************

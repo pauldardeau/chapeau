@@ -17,7 +17,8 @@ LIB_OBJS = Database.o \
 DBDate.o \
 DBStatementArgs.o \
 SQLiteDatabase.o \
-SQLiteResultSet.o
+SQLiteResultSet.o \
+UnitState.o
 
 all : $(LIB_NAME) $(EXE_NAME)
 
