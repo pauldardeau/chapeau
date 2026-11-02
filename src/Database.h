@@ -77,7 +77,76 @@ enum class DBErrorKind {
 const char* dbErrorKindName(DBErrorKind kind);
 
 /**
+ * A database connection.
  *
+ * Concurrency
+ *
+ * Chapeau is not thread safe. It supports one pattern, thread confinement
+ * with explicit hand-off, and nothing else.
+ *
+ * A "unit" is one database connection (a Database), the result sets (cursors)
+ * it has produced that have not been destroyed, and the prepared statements
+ * they use (the statement cache and the statements owned by result sets). The
+ * parts of a unit share state that nothing protects: the statement cache and
+ * its order, the set of live result sets, the error snapshot, the in-use
+ * marker, each statement's cursor count, and the underlying sqlite3*
+ * connection. A result set reads and writes its database as it runs and as it
+ * ends or is destroyed, and the database reads and writes its result sets when
+ * it closes. The rules:
+ *
+ *  1. At most one thread may access any part of a unit at a time.
+ *  2. Different database connections may be used concurrently by different
+ *     threads (also to the same file: SQLite's own locks and the busy timeout
+ *     coordinate them). Chapeau's own code keeps no mutable state that
+ *     connections share (see also the process-wide sinks below).
+ *  3. A unit may move between threads while it is idle (no call into it is
+ *     running).
+ *  4. A hand-off needs synchronization that the application provides: a
+ *     mutex, a condition variable, a join, a queue. Chapeau provides none.
+ *  5. Result sets move with the database they came from. A unit is moved
+ *     whole: never the database to one thread and its cursors to another.
+ *  6. Closing or destroying a database, and destroying a result set, are
+ *     accesses to the unit like any other: none of them may overlap any other
+ *     access to it. (A result set may be destroyed after its database was
+ *     closed or destroyed; the hand-off rules still apply to that call.)
+ *  7. The error snapshot (lastErrorKind(), lastErrorCode(),
+ *     lastErrorMessage()) belongs to the unit. Read it before the next
+ *     operation on the unit replaces it. A result set's own error
+ *     (DBResultSet::lastErrorCode() ...) belongs to that result set and
+ *     moves with it.
+ *  8. A transaction belongs to the connection, not to a thread. It stays open
+ *     when the unit moves, and the thread that has the unit may commit or roll
+ *     it back.
+ *  9. SQLite callbacks and hooks that the application installs through
+ *     sqliteHandle() (user functions, update hooks, a busy handler, ...) run
+ *     inside a Chapeau call, on that call's thread. They must not call back
+ *     into the same unit, and must not wait for another thread to use it.
+ * 10. Connection pooling is the application's responsibility. Chapeau has no
+ *     pool; checkedOut() and setCheckedOut() are plain flags that Chapeau
+ *     does not read.
+ *
+ * What this does not mean:
+ *  - Unsynchronized access to one connection from several threads is not
+ *    supported, whatever the operations are, reads included. A violation is a
+ *    data race: undefined behavior, not a reported error.
+ *  - SQLite's own thread mode does not change that. SQLite's serialized mode
+ *    (sqlite3_threadsafe() == 1) protects SQLite's connection object; it does
+ *    nothing for Chapeau's state around it, which is the part the rules above
+ *    are about.
+ *  - The in-use marker (SQLiteDatabase::inUse(), DBErrorKind::InUse) is not a
+ *    lock. It is a plain bool that catches a call made from inside another
+ *    call of the same database (re-entrance on one thread). It is not atomic,
+ *    does not wait, and is not a reliable detector of two threads: do not
+ *    depend on it to find, or to survive, a violation.
+ *  - Nothing in Chapeau enforces confinement. Keeping to the rules is the
+ *    caller's responsibility. A later version may check some of them
+ *    defensively; what is documented here is the contract either way.
+ *  - The process-wide sinks are the application's: errors logged by
+ *    setLogsErrors() go to stdout, and diagnostics go to Chaudiere's Logger.
+ *    The Logger the application installs must itself tolerate being called from
+ *    several threads if several connections are used at once.
+ *  - SQLite must be built thread safe (sqlite3_threadsafe() not 0) for any use
+ *    from more than one thread, including rule 2 and rule 3.
  */
 class Database {
 

@@ -24,7 +24,33 @@ class DBString;
 class DBDate;
 class DBData;
 
-
+/**
+ * A SQLite connection, with its statement cache.
+ *
+ * Concurrency: not thread safe. The database, its result sets and its
+ * statements are one unit, used by one thread at a time and moved between
+ * threads only while idle, with synchronization the application provides.
+ * Different SQLiteDatabase objects may be used by different threads at once.
+ * The full rules are in the comment of Database.
+ *
+ * What this class adds to them:
+ *  - sqliteHandle() is part of the unit. Using the handle while another thread
+ *    uses the database is a violation like any other.
+ *  - inUse() / the in-use marker is not a lock. It is a plain bool, set while
+ *    one of this database's calls runs and cleared when it returns or when the
+ *    result set it covers ends; it only catches a re-entrant call on the same
+ *    thread (DBErrorKind::InUse). Another thread cannot rely on seeing it, and
+ *    it is not atomic.
+ *  - SQLite's serialized mode makes the sqlite3* connection safe to call from
+ *    several threads. It does not protect the statement cache, the set of live
+ *    result sets, the error snapshot or the cursor counts kept here.
+ *  - close() and the destructor invalidate every live result set, so neither
+ *    may overlap any use of those result sets.
+ *  - open() does not check sqlite3_threadsafe(); a SQLite built without thread
+ *    safety must not be used from more than one thread at all.
+ *  - Busy handling (setBusyRetryTimeout()) is per connection, and is how
+ *    connections to one file wait for each other.
+ */
 class SQLiteDatabase : public Database {
 
 public:

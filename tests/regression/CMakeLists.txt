@@ -37,7 +37,14 @@ target_link_libraries(chapeau_probe PRIVATE chapeau)
 # scoped_temp_dir.h is shared with the in-process tests
 target_include_directories(chapeau_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-foreach(target chapeau_harness_helper chapeau_probe)
+# the supported concurrency patterns (H1a-12a); kept apart from chapeau_probe so
+# that only this program needs threads
+find_package(Threads REQUIRED)
+add_executable(chapeau_concurrency_probe chapeau_concurrency_probe.cpp)
+target_link_libraries(chapeau_concurrency_probe PRIVATE chapeau Threads::Threads)
+target_include_directories(chapeau_concurrency_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+foreach(target chapeau_harness_helper chapeau_probe chapeau_concurrency_probe)
    target_compile_features(${target} PRIVATE cxx_std_20)
    target_compile_options(${target} PRIVATE
       $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra>)
@@ -135,6 +142,24 @@ foreach(scenario
    errors_eager_busy_failure)
    chapeau_add_case(regression_${scenario} chapeau_probe ${scenario}
       TIMEOUT 60 LABEL regression)
+endforeach()
+
+# the supported concurrency patterns (H1a-12a): separate connections on threads,
+# a unit handed from one thread to another, the opener thread exiting, cursors
+# destroyed on another thread. Each runs in a bounded process, and carries the
+# label "concurrency" besides "regression" so that CI can select them without
+# naming or counting them (ctest -L concurrency).
+foreach(scenario
+   concurrency_sqlite_threading_configuration
+   concurrency_separate_connections_same_file
+   concurrency_handoff_cursor_continues
+   concurrency_handoff_keeps_error_snapshot_and_transaction
+   concurrency_opener_thread_exits
+   concurrency_cursor_destroyed_after_handoff
+   concurrency_cursor_outlives_database_across_threads)
+   chapeau_add_case(regression_${scenario} chapeau_concurrency_probe ${scenario}
+      TIMEOUT 120 LABEL regression)
+   set_property(TEST regression_${scenario} APPEND PROPERTY LABELS concurrency)
 endforeach()
 
 # the messages printed for a failed sqlite3_step: SQLite's own code and text,

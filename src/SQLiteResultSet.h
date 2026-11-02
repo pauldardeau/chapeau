@@ -71,8 +71,21 @@ class Date;
  * A result set may be destroyed at any time, before
  * or after the database it came from, and is not revived by the database
  * being opened again. Turning statement caching off does not affect an active
- * result set. Single-threaded: a result set and its database must not be used
- * from different threads at the same time.
+ * result set.
+ *
+ * Concurrency: a result set belongs to the unit of the database it came from
+ * (see the comment of Database) and moves with it. Stepping it, reading its
+ * columns, closing it and destroying it all read or write state that it shares
+ * with its database (the database's error snapshot and in-use marker, the
+ * database's list of live result sets, the statement and its cache entry), so
+ * none of them may overlap any other access to the database or to its other
+ * result sets, from any thread. A result set may be handed to another thread
+ * only together with its database, while the unit is idle, with
+ * synchronization the application provides; after that it continues where it
+ * was (the rows, status() and its own error are unchanged by the move). Do not
+ * hand a result set to a thread while the database stays with another.
+ * "Destroyed at any time, before or after the database" is about order, not
+ * about concurrency: the destruction still must not overlap a use of the unit.
  */
 class SQLiteResultSet : public DBResultSet {
 

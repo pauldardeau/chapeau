@@ -44,3 +44,40 @@ jobs:
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # ThreadSanitizer: the whole suite, including the concurrency scenarios of the
+  # subprocess regression harness (label "concurrency"). The scenarios are selected
+  # by label, so adding or removing one needs no change here; --no-tests=error fails
+  # the job if the label ever matches nothing. A sanitizer report fails the job:
+  # TSAN_OPTIONS halts at the first one, and the harness also classifies any report
+  # in a scenario's output as a failure.
+  tsan:
+    runs-on: ubuntu-latest
+    env:
+      TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install SQLite3
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Lower address-space randomization for ThreadSanitizer
+        # With the runner kernel's vm.mmap_rnd_bits=32, ThreadSanitizer can die at
+        # start-up with "unexpected memory mapping". 28 is the documented
+        # workaround. This changes only how the process is laid out in memory,
+        # never what the sanitizer reports.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || echo "vm.mmap_rnd_bits could not be lowered"
+      - name: Configure
+        run: >
+          cmake -S . -B build-tsan
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build
+        run: cmake --build build-tsan
+      - name: Test (concurrency scenarios)
+        run: ctest --test-dir build-tsan -L concurrency --no-tests=error --output-on-failure
+      - name: Test (everything else)
+        run: ctest --test-dir build-tsan --output-on-failure

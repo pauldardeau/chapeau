@@ -176,6 +176,71 @@ delete rs;
 db.close();
 ```
 
+Concurrency
+-----------
+**Chapeau is not thread safe.** It supports one pattern: a database
+connection and everything that came from it is used by one thread at a
+time. It does not make unsynchronized sharing safe, and it does not check
+that you kept to the rules.
+
+A **unit** is one `SQLiteDatabase` (one connection), the result sets
+(`executeQuery()` cursors) it produced that have not been destroyed, and the
+prepared statements they use (the statement cache and the statements a
+cursor owns). A cursor reads and writes its database while it steps, ends or
+is destroyed, and the database does the same to its cursors when it closes,
+so the parts of a unit share state that nothing protects: the statement cache,
+the set of live cursors, the error snapshot, the in-use marker, and the
+`sqlite3*` connection.
+
+The rules:
+
+1. At most one thread may access any part of a unit at a time.
+2. Different database connections may be used concurrently by different
+   threads, also to the same file; SQLite's file locks and the busy timeout
+   (`setBusyRetryTimeout()`, 5000 ms by default) make them wait for each other.
+3. A unit may move between threads while it is idle.
+4. A hand-off needs synchronization **you** provide (a mutex, a condition
+   variable, a `join`, a queue). Chapeau provides none.
+5. Cursors move with the database they came from: move the whole unit, never
+   the database to one thread and its cursors to another.
+6. `close()`, the destructor of a database, and the destruction of a cursor
+   are accesses like any other, and must not overlap any other access to the
+   unit.
+7. The error snapshot (`lastErrorKind()`, `lastErrorCode()`,
+   `lastErrorMessage()`) belongs to the unit. Read it before the next
+   operation replaces it. A cursor's own error belongs to the cursor.
+8. A transaction belongs to the connection, not to a thread: it stays open when
+   the unit moves, and whichever thread has the unit may commit or roll it back.
+9. SQLite callbacks and hooks you install through `sqliteHandle()` must not
+   reenter the same unit.
+10. Connection pooling is your application's job. Chapeau has no pool.
+
+What this does **not** mean:
+
+- Unsynchronized shared-connection access is not supported, for reads either.
+  A violation is a data race (undefined behavior), not an error code.
+- SQLite's serialized mode (`sqlite3_threadsafe() == 1`) does not make
+  Chapeau thread safe. It protects SQLite's connection object, not the state
+  Chapeau keeps around it.
+- The `inUse()` marker is not a lock. It is a plain `bool` that catches a call
+  made from inside another call on the same thread; it is not atomic and
+  cannot be relied on to notice, or to survive, a second thread.
+- Nothing enforces thread confinement yet; it is the caller's responsibility.
+  Defensive checks may be added later (they would be additions: the rules
+  above are the contract either way).
+- SQLite must be built thread safe (`sqlite3_threadsafe()` not 0) for use from
+  more than one thread. `open()` does not check this today; checking it is
+  planned.
+- Errors logged by `setLogsErrors(true)` go to stdout, and diagnostics go
+  to Chaudiere's `Logger`; if you install a logger and use several connections
+  at once, it must tolerate being called from several threads.
+
+The supported patterns are exercised, as bounded subprocess scenarios, by the
+`concurrency_*` cases of the regression harness (`tests/regression/`), and the
+suite is run under ThreadSanitizer in CI (the `tsan` job). The same contract
+is written in the header comments of `Database.h`, `SQLiteDatabase.h` and
+`SQLiteResultSet.h`.
+
 Testing
 -------
 Chapeau's test suite (`tests/`, built on poivre's `TestSuite`/`TEST_CASE`

@@ -64,6 +64,23 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   return value and the recorded error are the same either way. The busy failure
   of an update and of a cursor is checked in its own bounded process. (Stdout
   capture uses POSIX `dup2`; on Windows the capture is a no-op.)
+* **Concurrency scenarios** (`concurrency_*` in `chapeau_concurrency_probe.cpp`,
+  H1a-12a; labels `regression` and `concurrency`): the patterns that Chapeau
+  supports (see the *Concurrency* section of the top-level README), and only
+  those. Several threads each with a connection of their own on one file; a
+  connection with a live cursor handed from one thread to another through a
+  mutex and condition variable (the cursor carries on, the error snapshot and an
+  open transaction move with the unit); the opening thread exiting, also through
+  a chain of short-lived threads; cursors destroyed on another thread, and
+  outliving their database across threads; and a record of `sqlite3_threadsafe()`.
+  They never share a unit between two threads at once: that is not supported, so
+  it is not tested as if it were, and no scenario is racy on purpose. They are
+  meant to run clean under ThreadSanitizer (`-fsanitize=thread`; the CI job
+  `tsan` runs them with `ctest -L concurrency`). Worker threads do not call
+  `check()`; they record into a `Report` that the main thread prints after the
+  join, and every wait has a limit that ends the process with a failed check.
+  The waits use the system clock on purpose (see `waitFor()` in the probe): the
+  ThreadSanitizer of GCC 11 mis-reports `condition_variable::wait_for()`.
 
 ## Seeing the defects
 
