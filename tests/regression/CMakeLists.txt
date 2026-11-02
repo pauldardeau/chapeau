@@ -186,6 +186,10 @@ foreach(entry IN LISTS CHAPEAU_FIXED_TABLE)
       TIMEOUT ${timeout} LABEL regression)
 endforeach()
 
+# ---- a SQLite without threading support: opt-in, needs the pinned amalgamation ----
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/threadsafe0.cmake)
+
 # ---- known defects: opt-in, failing until fixed ------------------------------
 
 if(CHAPEAU_KNOWN_DEFECTS)

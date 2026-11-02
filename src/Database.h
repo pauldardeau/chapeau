@@ -58,6 +58,14 @@ enum class DBResultSetStatus {
  * code. The other kinds are failures that are Chapeau's own: no SQLite call
  * failed, so lastErrorCode() is 0 for them -- except BindFailed, which carries
  * SQLite's code when it was a sqlite3_bind_*() call that failed.
+ *
+ * Compatibility: UnsupportedLibrary, the last enumerator, was added after
+ * the others, which keep their values; the underlying type is unchanged. Source:
+ * code that switches over DBErrorKind without a default case gets a
+ * -Wswitch warning for the new enumerator until it handles it, and code
+ * that treats "not None and not Sqlite" as 'Chapeau's own failure' now also
+ * sees this one. Binary: compiled code that only compares kinds it knows is
+ * unaffected; nothing else about the class layout changed.
  */
 enum class DBErrorKind {
    None,             // the last operation succeeded
@@ -67,8 +75,11 @@ enum class DBErrorKind {
    NoConnection,     // there is no open connection
    AlreadyOpen,      // open() on a database that is already open
    InUse,            // the database was used while one of its operations was running
-   RefusedStatement  // the SQL was refused without being run: a statement that returns rows given to
+   RefusedStatement, // the SQL was refused without being run: a statement that returns rows given to
                      // executeUpdate(), or SQL with more than one statement or a NUL byte
+   UnsupportedLibrary // open() was refused because the underlying library is not one Chapeau supports:
+                      // SQLite compiled without threading support (sqlite3_threadsafe() is 0). Nothing
+                      // was opened; the code is 0
 };
 
 /**
@@ -146,7 +157,11 @@ const char* dbErrorKindName(DBErrorKind kind);
  *    The Logger the application installs must itself tolerate being called from
  *    several threads if several connections are used at once.
  *  - SQLite must be built thread safe (sqlite3_threadsafe() not 0) for any use
- *    from more than one thread, including rule 2 and rule 3.
+ *    from more than one thread, including rule 2 and rule 3. SQLiteDatabase::
+ *    open() refuses a library that is not (DBErrorKind::UnsupportedLibrary).
+ *    That is a check of SQLite's compile-time mode only; it says nothing about
+ *    SQLite's run-time configuration, and it does not make Chapeau thread
+ *    safe: the rules above still apply in full to a library that passes it.
  */
 class Database {
 

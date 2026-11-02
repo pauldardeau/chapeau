@@ -315,6 +315,7 @@ const char* chapeau::dbErrorKindName(DBErrorKind kind) {
       case DBErrorKind::AlreadyOpen:      return "AlreadyOpen";
       case DBErrorKind::InUse:            return "InUse";
       case DBErrorKind::RefusedStatement: return "RefusedStatement";
+      case DBErrorKind::UnsupportedLibrary: return "UnsupportedLibrary";
    }
    return "Unknown";
 }

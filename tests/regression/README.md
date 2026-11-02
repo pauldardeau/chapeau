@@ -82,6 +82,24 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   The waits use the system clock on purpose (see `waitFor()` in the probe): the
   ThreadSanitizer of GCC 11 mis-reports `condition_variable::wait_for()`.
 
+* **SQLite threading-mode programs** (`threadsafe0_probe.cpp`,
+  `threadsafe2_probe.cpp`, H1a-12b; labels `regression` and `sqlite-threading`;
+  **opt-in**, `-DCHAPEAU_THREADSAFE0_TEST=ON`): `open()` refuses a SQLite that was
+  compiled without threading support (`sqlite3_threadsafe()` == 0) with
+  `DBErrorKind::UnsupportedLibrary`, code 0. The only honest test of that is a
+  SQLite that really is one, so CMake builds a pinned SQLite amalgamation (3.37.2,
+  SHA-256 pinned in `threadsafe0.cmake`) with `-DSQLITE_THREADSAFE=0`, and again
+  with `=2`, and compiles Chapeau's sources into each program so that they run on
+  it instead of on the system SQLite. Nothing is mocked. The amalgamation is
+  taken from `-DCHAPEAU_THREADSAFE0_SQLITE_DIR=<dir>` (no network) or, if that is
+  empty, downloaded by `FetchContent` and checked against the pinned hash; an
+  ordinary build never downloads anything. The `=0` program shows the error (kind,
+  code, message with the SQLite version, logging once or not at all), and that
+  nothing was opened: a counting VFS sees no `xOpen`, no file appears,
+  `sqliteHandle()` is null and SQLite's memory use is unchanged (the counter is
+  shown to work by a raw `sqlite3_open`). The `=2` (multi-thread) program shows
+  that a library with some threading support is not refused.
+
 ## Seeing the defects
 
 The use-after-free defects (CH-01, CH-02) read freed memory; in a plain build

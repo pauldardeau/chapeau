@@ -81,3 +81,36 @@ jobs:
         run: ctest --test-dir build-tsan -L concurrency --no-tests=error --output-on-failure
       - name: Test (everything else)
         run: ctest --test-dir build-tsan --output-on-failure
+
+  # Chapeau against a SQLite compiled with SQLITE_THREADSAFE=0, which open() must
+  # refuse. This is the one job that downloads anything: the pinned SQLite
+  # amalgamation (tests/regression/threadsafe0.cmake checks its SHA-256, and a
+  # mismatch stops the configure step). Ordinary builds never do. AddressSanitizer
+  # and LeakSanitizer are on, so a connection or allocation left behind by a
+  # refusal fails the job too.
+  threadsafe0:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install SQLite3
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build-ts0
+          -DCHAPEAU_THREADSAFE0_TEST=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1"
+          -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+      - name: Build
+        run: cmake --build build-ts0
+      - name: Test (SQLITE_THREADSAFE=0)
+        run: ctest --test-dir build-ts0 -L sqlite-threading --no-tests=error --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+      - name: Test (everything else)
+        run: ctest --test-dir build-ts0 --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1

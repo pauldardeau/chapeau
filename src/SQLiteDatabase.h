@@ -46,8 +46,21 @@ class DBData;
  *    result sets, the error snapshot or the cursor counts kept here.
  *  - close() and the destructor invalidate every live result set, so neither
  *    may overlap any use of those result sets.
- *  - open() does not check sqlite3_threadsafe(); a SQLite built without thread
- *    safety must not be used from more than one thread at all.
+ *  - Three things are easy to confuse here:
+ *      1. SQLite's compile-time threading support (SQLITE_THREADSAFE, reported by
+ *         sqlite3_threadsafe(): 0 none, 1 serialized, 2 multi-thread).
+ *         open() refuses a library whose answer is 0 (DBErrorKind::
+ *         UnsupportedLibrary, code 0, nothing opened), because such a SQLite has
+ *         no mutexes and none of the patterns documented in Database holds on it.
+ *      2. SQLite's run-time threading configuration (sqlite3_config() with
+ *         SQLITE_CONFIG_SINGLETHREAD/MULTITHREAD/SERIALIZED, and the per-
+ *         connection SQLITE_OPEN_NOMUTEX/FULLMUTEX flags). Chapeau neither sets
+ *         nor checks it: an application that switches a thread-safe library to
+ *         single-thread mode at run time gets no warning.
+ *      3. Chapeau's own thread-confinement contract (the rules in Database).
+ *         The check in 1 is a precondition for it, not a part of it: a library
+ *         that passes the check does not make a SQLiteDatabase thread safe, and
+ *         nothing in Chapeau enforces confinement.
  *  - Busy handling (setBusyRetryTimeout()) is per connection, and is how
  *    connections to one file wait for each other.
  */
@@ -65,6 +78,14 @@ public:
     * (DBErrorKind::Sqlite), and then no connection is left behind, the reason
     * is available from lastErrorCode() and lastErrorMessage(), and open() may
     * be tried again (for instance once the missing directory exists).
+    *
+    * It also fails, before anything is opened, if the SQLite library in use
+    * was compiled without threading support (sqlite3_threadsafe() is 0):
+    * DBErrorKind::UnsupportedLibrary, code 0, and a message that names the
+    * library version and says what to use instead. No connection is created
+    * and no file is touched, the object stays valid and unopened, and every
+    * further open() is refused the same way. A library with threading support
+    * is not affected. See the class comment for what this check is, and is not.
     */
    bool open();
 
@@ -102,7 +123,8 @@ public:
    // (prepare, step, open, close, a failed bind) carries SQLite's result code and
    // sqlite3_errmsg() text as they were when it happened; the failures that are
    // not SQLite's (a wrong number of arguments, no connection, open() twice, a
-   // refused statement, re-entrant use) have code 0.
+   // refused statement, re-entrant use, an unsupported SQLite library) have
+   // code 0.
 
    /**
     * @return true if the last operation failed, that is lastErrorKind() is not

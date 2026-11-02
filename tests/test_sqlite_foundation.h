@@ -118,6 +118,8 @@ protected:
    void test_statement_boundary_accepts();
    void test_statement_boundary_and_the_statement_cache();
    void test_statement_boundary_with_transactions_and_cursors();
+   void test_error_kind_names();
+   void test_open_with_a_threadsafe_library();
 
    void requireLongEquals(long long expected,
                           long long actual,

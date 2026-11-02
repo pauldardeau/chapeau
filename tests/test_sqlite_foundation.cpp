@@ -155,6 +155,8 @@ void TestSQLiteFoundation::runTests() {
    test_statement_boundary_accepts();
    test_statement_boundary_and_the_statement_cache();
    test_statement_boundary_with_transactions_and_cursors();
+   test_error_kind_names();
+   test_open_with_a_threadsafe_library();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -5352,4 +5354,84 @@ void TestSQLiteFoundation::test_statement_boundary_with_transactions_and_cursors
    }
 
    db.close();
+}
+
+void TestSQLiteFoundation::test_error_kind_names() {
+   TEST_CASE("test_error_kind_names");
+   struct Named {
+      DBErrorKind kind;
+      const char* name;
+   };
+   const Named ALL[] = {
+      {DBErrorKind::None, "None"},
+      {DBErrorKind::Sqlite, "Sqlite"},
+      {DBErrorKind::BindCount, "BindCount"},
+      {DBErrorKind::BindFailed, "BindFailed"},
+      {DBErrorKind::NoConnection, "NoConnection"},
+      {DBErrorKind::AlreadyOpen, "AlreadyOpen"},
+      {DBErrorKind::InUse, "InUse"},
+      {DBErrorKind::RefusedStatement, "RefusedStatement"},
+      {DBErrorKind::UnsupportedLibrary, "UnsupportedLibrary"},
+   };
+
+   for (const Named& n : ALL) {
+      requireStringEquals(n.name, dbErrorKindName(n.kind), string("the name of kind ") + n.name);
+   }
+
+   // the existing kinds keep their values, and the new one comes after them
+   requireLongEquals(0, static_cast<long long>(DBErrorKind::None), "None is 0");
+   requireLongEquals(7, static_cast<long long>(DBErrorKind::RefusedStatement), "RefusedStatement is still 7");
+   requireLongEquals(8, static_cast<long long>(DBErrorKind::UnsupportedLibrary), "UnsupportedLibrary is 8");
+
+   // a value that is no kind has a name too, and it is not one of the real ones
+   requireStringEquals("Unknown", dbErrorKindName(static_cast<DBErrorKind>(99)), "a value that is no kind");
+}
+
+void TestSQLiteFoundation::test_open_with_a_threadsafe_library() {
+   TEST_CASE("test_open_with_a_threadsafe_library");
+   // The refusal of a SQLite without threading support is tested against a real
+   // SQLITE_THREADSAFE=0 library, in its own program (tests/regression, option
+   // CHAPEAU_THREADSAFE0_TEST). What can be tested here is that the library
+   // this suite runs against is not refused, and that open() is otherwise as it was.
+   require(::sqlite3_threadsafe() != 0, "this suite runs against a SQLite with threading support");
+
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("guard.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+
+   require(db.open(), "open() is not refused");
+   requireLastError(db, DBErrorKind::None, 0, "", "and records no error");
+   sqlite3* const handle = db.sqliteHandle();
+   require(handle != nullptr, "there is a connection");
+   require(db.goodConnection(), "which works");
+   require(exec(db, "create table g(a integer)"), "create a table");
+
+   // an open database keeps its own answer, and its connection
+   require(!db.open(), "open() on an open database");
+   requireLastError(db, DBErrorKind::AlreadyOpen, 0, "already open", "second open()");
+   require(db.sqliteHandle() == handle, "the connection is unchanged");
+   require(exec(db, "insert into g(a) values (1)"), "and still works");
+
+   // close and open again
+   db.close();
+   require(db.sqliteHandle() == nullptr, "closed");
+   require(db.open(), "opens again");
+   requireLastError(db, DBErrorKind::None, 0, "", "with no error");
+   unique_ptr<SQLiteResultSet> rs(openCursor(db, "select a from g"));
+   require(rs && rs->next() && rs->longForColumnIndex(0) == 1, "and the data is there");
+   rs.reset();
+   db.close();
+
+   // a failed open still records its own kind (not UnsupportedLibrary), and a later one works
+   SQLiteDatabase missing((fs::path(dir.file("not_there")) / "x.sqlite3").string());
+   missing.setLogsErrors(false);
+   require(!missing.open(), "open() in a directory that does not exist");
+   requireLastError(missing, DBErrorKind::Sqlite, SQLITE_CANTOPEN, "unable to open database file", "the failure is SQLite's");
+   require(missing.lastErrorKind() != DBErrorKind::UnsupportedLibrary, "and not the library guard");
+   require(missing.sqliteHandle() == nullptr, "no connection is left");
+   require(fs::create_directory(fs::path(dir.file("not_there"))), "create the directory");
+   require(missing.open(), "now it opens");
+   requireLastError(missing, DBErrorKind::None, 0, "", "and the error is cleared");
+   missing.close();
 }

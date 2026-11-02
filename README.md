@@ -228,9 +228,22 @@ What this does **not** mean:
 - Nothing enforces thread confinement yet; it is the caller's responsibility.
   Defensive checks may be added later (they would be additions: the rules
   above are the contract either way).
-- SQLite must be built thread safe (`sqlite3_threadsafe()` not 0) for use from
-  more than one thread. `open()` does not check this today; checking it is
-  planned.
+- Three different things are easy to confuse:
+  1. **SQLite's compile-time threading support** (`SQLITE_THREADSAFE`, reported
+     by `sqlite3_threadsafe()`: 0 none, 1 serialized, 2 multi-thread). Chapeau
+     requires it: `open()` returns `false` with `lastErrorKind()` ==
+     `DBErrorKind::UnsupportedLibrary` (code 0) when it is 0, before any handle
+     is created or any file touched. The message names the SQLite version and
+     says to use a build with threading enabled. The object stays valid and
+     unopened.
+  2. **SQLite's run-time threading configuration** (`sqlite3_config()` with
+     `SQLITE_CONFIG_SINGLETHREAD`, `MULTITHREAD` or `SERIALIZED`, and the
+     `SQLITE_OPEN_NOMUTEX`/`FULLMUTEX` flags). Chapeau neither sets nor checks
+     it. A thread-safe library that the application has switched to
+     single-thread mode at run time is not detected.
+  3. **Chapeau's own thread-confinement contract** (the rules above). The check
+     in 1 is a precondition for it. **It does not make Chapeau thread safe**:
+     a library that passes it is still used one thread at a time per unit.
 - Errors logged by `setLogsErrors(true)` go to stdout, and diagnostics go
   to Chaudiere's `Logger`; if you install a logger and use several connections
   at once, it must tolerate being called from several threads.

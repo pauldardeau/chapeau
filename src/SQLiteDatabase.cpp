@@ -91,6 +91,22 @@ bool SQLiteDatabase::open() {
       return false;
    }
 
+   // A SQLite built without threading support (SQLITE_THREADSAFE=0) has no
+   // mutexes at all, so none of what Chapeau documents about threads (separate
+   // connections on separate threads, a unit handed from one thread to another)
+   // holds on it. It is refused here, before a handle is created or a file is
+   // touched, and the object stays as it was: not open, and able to try again.
+   // This reads the library's compile-time mode only; see the class comment.
+   if (0 == ::sqlite3_threadsafe()) {
+      fail(DBErrorKind::UnsupportedLibrary, 0,
+           "unsupported library: SQLite " + std::string(::sqlite3_libversion()) +
+           " was compiled without threading support (sqlite3_threadsafe() returned 0), "
+           "which Chapeau requires; nothing was opened. Use a SQLite build with "
+           "threading enabled (SQLITE_THREADSAFE=1 or 2)",
+           "open", m_databasePath);
+      return false;
+   }
+
    Logger::debug("opening database '" + m_databasePath + "'");
    sqlite3* handle = nullptr;
    const int err = ::sqlite3_open(m_databasePath.c_str(), &handle);
