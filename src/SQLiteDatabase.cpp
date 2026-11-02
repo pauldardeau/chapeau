@@ -142,6 +142,33 @@ bool SQLiteDatabase::prepareStatement(const std::string& sql,
 
 //******************************************************************************
 
+DBResultSet* SQLiteDatabase::openResultSet(SQLiteStatement* statement,
+                                           const std::string& sql) {
+   // the statement gets closed in rs dtor or close method
+   statement->incrementUseCount();
+   SQLiteResultSet* resultSet = new SQLiteResultSet(statement, this, sql);
+
+   // A statement with result columns is run by stepping the result set. One
+   // without -- INSERT, UPDATE, DELETE, DDL, BEGIN, a PRAGMA that sets a
+   // value -- has no rows to step to, so nothing would ever run it: it is run
+   // here, to completion, through the same code that next() uses. The result
+   // set that comes back is then already Done, or Error with the failure in
+   // it, and has let go of its statement.
+   if (::sqlite3_column_count(statement->statement()) == 0) {
+      resultSet->advance("executeQuery");
+
+      if (DBResultSetStatus::Done == resultSet->status()) {
+         // this call succeeded, whatever a re-entrant call made from inside it
+         // (an SQL function that used this database) recorded meanwhile
+         clearLastError();
+      }
+   }
+
+   return resultSet;
+}
+
+//******************************************************************************
+
 bool SQLiteDatabase::refuseRowReturningUpdate(sqlite3_stmt* pStmt,
                                               const std::string& sql,
                                               bool ownedByCache) {
@@ -644,10 +671,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
       }
    }
 
-   statement->incrementUseCount();
-
-   // the statement gets closed in rs dtor or close method
-   return new SQLiteResultSet(statement, this, sql);
+   return openResultSet(statement, sql);
 }
 
 //******************************************************************************
@@ -741,10 +765,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
       setCachedStatement(statement, sql);
    }
 
-   statement->incrementUseCount();
-
-   // the statement gets closed in rs dtor or close method
-   return new SQLiteResultSet(statement, this, sql);
+   return openResultSet(statement, sql);
 }
 
 //******************************************************************************

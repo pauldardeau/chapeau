@@ -105,6 +105,10 @@ protected:
    void test_last_error_lifetime();
    void test_open_failure_is_recorded();
    void test_cursor_error_message();
+   void test_query_without_result_columns_runs_before_it_returns();
+   void test_query_with_result_columns_stays_lazy();
+   void test_query_without_result_columns_that_fails();
+   void test_query_without_result_columns_reentrancy();
 
    void requireLongEquals(long long expected,
                           long long actual,

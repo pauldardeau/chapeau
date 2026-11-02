@@ -188,6 +188,12 @@ void SQLiteResultSet::setupColumnNames() const {
 //******************************************************************************
 
 bool SQLiteResultSet::next() {
+   return advance("next()");
+}
+
+//******************************************************************************
+
+bool SQLiteResultSet::advance(const char* operation) {
    if (isFinished()) {
       // done, failed, or invalidated by the database closing: there is
       // nothing to step, and there never will be again
@@ -220,7 +226,7 @@ bool SQLiteResultSet::next() {
    // SQLite's message for after the statement is released, and do not try the
    // query again. The database records the failure too (and logs it, if it is
    // set to).
-   const std::string message = m_parentDB->stepFailed("next()", rc, query());
+   const std::string message = m_parentDB->stepFailed(operation, rc, query());
    finish(DBResultSetStatus::Error, rc, message);
    return false;
 }

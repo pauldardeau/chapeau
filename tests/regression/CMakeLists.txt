@@ -131,7 +131,8 @@ endforeach()
 foreach(scenario
    errors_logged_once_with_kind_code_and_message
    errors_silent_when_logging_is_off
-   errors_busy_is_recorded_and_recovers)
+   errors_busy_is_recorded_and_recovers
+   errors_eager_busy_failure)
    chapeau_add_case(regression_${scenario} chapeau_probe ${scenario}
       TIMEOUT 60 LABEL regression)
 endforeach()
@@ -143,7 +144,7 @@ chapeau_add_case(regression_diagnostics_step_error_messages chapeau_probe
    TIMEOUT 60 LABEL regression
    MATCH
       "DB Error [[]Sqlite[]] code=19: UNIQUE constraint failed: t[.]id in executeUpdate"
-      "DB Error [[]Sqlite[]] code=19: UNIQUE constraint failed: t[.]id in next[(][)]"
+      "DB Error [[]Sqlite[]] code=19: UNIQUE constraint failed: t[.]id in executeQuery"
       "DB Error [[]Sqlite[]] code=1: integer overflow in next[(][)]"
       "DB Error [[]Sqlite[]] code=5: database is locked [(]gave up after waiting 100 ms[)] in executeUpdate"
    REJECT

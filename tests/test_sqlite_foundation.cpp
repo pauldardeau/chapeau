@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -146,6 +147,10 @@ void TestSQLiteFoundation::runTests() {
    test_last_error_lifetime();
    test_open_failure_is_recorded();
    test_cursor_error_message();
+   test_query_without_result_columns_runs_before_it_returns();
+   test_query_with_result_columns_stays_lazy();
+   test_query_without_result_columns_that_fails();
+   test_query_without_result_columns_reentrancy();
 }
 
 void TestSQLiteFoundation::requireLongEquals(long long expected,
@@ -4218,13 +4223,13 @@ void TestSQLiteFoundation::test_last_error_lifetime() {
 
    // a result set that fails in next() records the failure on the database too
    {
-      unique_ptr<DBResultSet> cursor(db.executeQuery("insert into items(id,name) values (1,'again')"));
-      require(cursor != nullptr, "a statement given to executeQuery");
+      unique_ptr<DBResultSet> cursor(db.executeQuery("select abs(-9223372036854775807 - 1)"));
+      require(cursor != nullptr, "a query given to executeQuery");
       requireLastError(db, DBErrorKind::None, 0, "", "creating the result set succeeded");
       require(cursor && !cursor->next(), "which fails when stepped");
-      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed", "the failed step");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "integer overflow", "the failed step");
       cursor.reset();
-      requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE", "destroying the failed result set");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "integer overflow", "destroying the failed result set");
    }
    unique_ptr<DBResultSet> fine(db.executeQuery("select 1"));
    requireLastError(db, DBErrorKind::None, 0, "", "cleared by a successful query");
@@ -4303,10 +4308,11 @@ void TestSQLiteFoundation::test_cursor_error_message() {
                  when + ": Done: no message");
       }
 
+      // a statement without result columns is run by executeQuery(): its failure is
+      // already in the result set that comes back
       unique_ptr<SQLiteResultSet> failed(openCursor(*db, "insert into items(id,name) values (1,'again')"));
-      require(failed != nullptr, when + ": a result set over a statement that will fail");
-      require(failed && failed->lastErrorMessage().empty(), when + ": no message before it is stepped");
-      require(failed && !failed->next(), when + ": next() fails");
+      require(failed != nullptr, when + ": a result set over a statement that fails");
+      require(failed && !failed->next(), when + ": next() is false");
       require(failed && failed->status() == DBResultSetStatus::Error, when + ": status Error");
       requireLongEquals(SQLITE_CONSTRAINT, failed ? (failed->lastErrorCode() & 0xff) : -1, when + ": the code");
       const string expected = "UNIQUE constraint failed: items.id";
@@ -4333,7 +4339,9 @@ void TestSQLiteFoundation::test_cursor_error_message() {
       requireStringEquals(expected, failed->lastErrorMessage(), when + ": after an unrelated success");
 
       unique_ptr<SQLiteResultSet> overflow(openCursor(*db, "select abs(-9223372036854775807 - 1)"));
-      require(overflow && !overflow->next(), when + ": a second result set fails differently");
+      require(overflow && overflow->status() == DBResultSetStatus::Ready && overflow->lastErrorMessage().empty(),
+              when + ": a query that fails when stepped has no message before that");
+      require(overflow && !overflow->next(), when + ": a second result set fails, when stepped, differently");
       requireLongEquals(SQLITE_ERROR, overflow ? overflow->lastErrorCode() : -1, when + ": its code");
       require(overflow && overflow->lastErrorMessage().find("integer overflow") != string::npos,
               when + ": its message is its own: " + (overflow ? overflow->lastErrorMessage() : string()));
@@ -4354,4 +4362,465 @@ void TestSQLiteFoundation::test_cursor_error_message() {
       require(overflow->lastErrorMessage().find("integer overflow") != string::npos, when + ": (second) after destruction");
       require(failed->status() == DBResultSetStatus::Error, when + ": still Error");
    }
+}
+
+// ---- executeQuery() and statements without result columns (CH-18) ----------
+
+namespace {
+
+// a statement without result columns given to executeQuery(), what an
+// independent connection sees before the call, and as soon as it returns
+struct EagerCase {
+   string label;
+   string sql;
+   function<void(DBStatementArgs&)> bindArguments;   // empty: the overload without arguments
+   string probe;                                     // run on the independent connection
+   string before;
+   string after;
+};
+
+// the fixture of the cases: t(id, v) with three rows, and an empty table o
+bool resetEagerFixture(SQLiteDatabase& db) {
+   const bool wasCaching = db.shouldCacheStatements();
+   db.setShouldCacheStatements(false);
+   bool ok = exec(db, "drop table if exists t") && exec(db, "drop table if exists o") &&
+             exec(db, "drop table if exists made") &&
+             exec(db, "create table t(id integer primary key, v text not null)") &&
+             exec(db, "insert into t(id,v) values (1,'a'),(2,'b'),(3,'c')") &&
+             exec(db, "create table o(a integer)") && exec(db, "pragma user_version = 0");
+   db.setShouldCacheStatements(wasCaching);
+   db.clearCachedStatements();
+   return ok;
+}
+
+}
+
+void TestSQLiteFoundation::test_query_without_result_columns_runs_before_it_returns() {
+   TEST_CASE("test_query_without_result_columns_runs_before_it_returns");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("eager.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   const string count = "select count(*) from t";
+   const vector<EagerCase> cases = {
+      {"INSERT", "insert into t(id,v) values (10,'x')", nullptr, count, "3", "4"},
+      {"INSERT with arguments", "insert into t(id,v) values (?,?)",
+       [](DBStatementArgs& a) { a.add(new DBLong(10)); a.add(new DBString("x")); }, count, "3", "4"},
+      {"UPDATE", "update t set v = 'u' where id = 1", nullptr, "select v from t where id = 1", "a", "u"},
+      {"UPDATE with arguments", "update t set v = ? where id = ?",
+       [](DBStatementArgs& a) { a.add(new DBString("u")); a.add(new DBLong(1)); },
+       "select v from t where id = 1", "a", "u"},
+      {"DELETE", "delete from t where id > 1", nullptr, count, "3", "1"},
+      {"DELETE with arguments", "delete from t where id > ?",
+       [](DBStatementArgs& a) { a.add(new DBLong(1)); }, count, "3", "1"},
+      {"CREATE TABLE", "create table made(a integer)", nullptr,
+       "select count(*) from sqlite_master where name = 'made'", "0", "1"},
+      {"CREATE INDEX", "create index ix_v on t(v)", nullptr,
+       "select count(*) from sqlite_master where name = 'ix_v'", "0", "1"},
+      {"DROP TABLE", "drop table o", nullptr,
+       "select count(*) from sqlite_master where name = 'o'", "1", "0"},
+      {"PRAGMA that sets a value and returns nothing", "pragma user_version = 7", nullptr,
+       "pragma user_version", "0", "7"},
+   };
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+
+      for (const EagerCase& c : cases) {
+         const string label = when + ", " + c.label;
+         require(resetEagerFixture(db), label + ": fixture");
+         requireStringEquals(c.before, rawFirstRow(path, c.probe), label + ": before the call");
+
+         DBStatementArgs args;
+         if (c.bindArguments) {
+            c.bindArguments(args);
+         }
+         unique_ptr<DBResultSet> rs(c.bindArguments ? db.executeQuery(c.sql, args) : db.executeQuery(c.sql));
+
+         // run before executeQuery() returned: visible to another connection with the
+         // result set still alive, and never stepped
+         require(rs != nullptr, label + ": a result set");
+         requireStringEquals(c.after, rawFirstRow(path, c.probe), label + ": already done when executeQuery() returns");
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Done, label + ": status is Done");
+            requireLongEquals(0, rs->lastErrorCode(), label + ": no error code");
+            require(rs->lastErrorMessage().empty(), label + ": no error message");
+         }
+         requireLastError(db, DBErrorKind::None, 0, "", label + ": the database has no error");
+
+         // the statement was let go of when it finished
+         const vector<string> expectedStatements = (pass == 0) ? vector<string>{c.sql} : vector<string>{};
+         require(openStatementSql(db) == expectedStatements,
+                 label + ": the statement is idle in the cache, or finalized: " + describe(openStatementSql(db)));
+
+         // stepping it is not another execution
+         for (int i = 0; i < 3 && rs; ++i) {
+            require(!rs->next(), label + ": next() is false");
+         }
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Done, label + ": and the status stays Done");
+         }
+         requireStringEquals(c.after, rawFirstRow(path, c.probe), label + ": next() did not run it again");
+         rs.reset();
+         requireStringEquals(c.after, rawFirstRow(path, c.probe), label + ": nor did destroying the result set");
+      }
+
+      // the same statement again and again: executed once per call, nothing left over
+      {
+         require(resetEagerFixture(db), when + ": fixture for reuse");
+         // the result sets are kept: a finished one holds nothing, so the next run
+         // of the same SQL finds its statement idle and uses it, not a second one
+         vector<unique_ptr<DBResultSet>> kept;
+         for (int i = 0; i < 4; ++i) {
+            DBStatementArgs args;
+            args.add(new DBLong(30 + i));
+            args.add(new DBString("again"));
+            kept.emplace_back(db.executeQuery("insert into t(id,v) values (?,?)", args));
+            require(kept.back() && kept.back()->status() == DBResultSetStatus::Done, when + ": reuse " + to_string(i) + ": done");
+            requireLongEquals(4 + i, countFromNewConnection(path, "t"),
+                              when + ": reuse " + to_string(i) + ": exactly one more row, at once");
+         }
+         const vector<string> expectedAfterReuse =
+            (pass == 0) ? vector<string>{"insert into t(id,v) values (?,?)"} : vector<string>{};
+         require(openStatementSql(db) == expectedAfterReuse,
+                 when + ": four finished result sets hold no statement: " + describe(openStatementSql(db)));
+         requireStringEquals("30,31,32,33", rawFirstRow(path, "select group_concat(id) from t where v = 'again'"),
+                             when + ": the rows that were stored");
+      }
+
+      // a statement with no text to run
+      for (const char* empty : {"", "   ", "-- nothing here"}) {
+         unique_ptr<DBResultSet> rs(db.executeQuery(empty));
+         require(rs != nullptr && rs->status() == DBResultSetStatus::Done && !rs->next(),
+                 when + ": an empty statement (" + empty + ") is a finished result set");
+         requireLastError(db, DBErrorKind::None, 0, "", when + ": and no error");
+      }
+
+      // alongside an active result set: both are fine, and the active one carries on
+      {
+         require(resetEagerFixture(db), when + ": fixture for the active cursor");
+         unique_ptr<SQLiteResultSet> reading(openCursor(db, "select id from t order by id"));
+         require(reading && reading->next(), when + ": an active result set");
+         unique_ptr<DBResultSet> inserted(db.executeQuery("insert into o(a) values (1)"));
+         require(inserted && inserted->status() == DBResultSetStatus::Done, when + ": an insert runs beside it");
+         unique_ptr<DBResultSet> sameSql(db.executeQuery("select id from t order by id"));
+         require(sameSql && sameSql->status() == DBResultSetStatus::Ready, when + ": the same SQL is a second, lazy cursor");
+         requireLongEquals(1, countFromNewConnection(path, "o"), when + ": the insert is stored");
+         if (reading) {
+            requireLongEquals(1, reading->intForColumnIndex(0), when + ": the active cursor is on its first row");
+            require(reading->next(), when + ": and carries on");
+            requireLongEquals(2, reading->intForColumnIndex(0), when + ": to the second");
+         }
+      }
+   }
+
+   // transaction statements are run at once, and inTransaction() follows
+   db.setShouldCacheStatements(true);
+   require(resetEagerFixture(db), "fixture for transactions");
+   {
+      unique_ptr<DBResultSet> begin(db.executeQuery("BEGIN"));
+      require(begin && begin->status() == DBResultSetStatus::Done, "BEGIN through executeQuery");
+      require(db.inTransaction(), "the transaction is open as soon as executeQuery() returns");
+      unique_ptr<DBResultSet> insert(db.executeQuery("insert into t(id,v) values (50,'in transaction')"));
+      require(insert && insert->status() == DBResultSetStatus::Done, "an insert inside it");
+      requireLongEquals(3, countFromNewConnection(path, "t"), "not visible to another connection before the commit");
+      unique_ptr<DBResultSet> commit(db.executeQuery("COMMIT"));
+      require(commit && commit->status() == DBResultSetStatus::Done, "COMMIT through executeQuery");
+      require(!db.inTransaction(), "the transaction is closed as soon as executeQuery() returns");
+      requireLongEquals(4, countFromNewConnection(path, "t"), "and the row is visible");
+   }
+   {
+      unique_ptr<DBResultSet> begin(db.executeQuery("BEGIN"));
+      unique_ptr<DBResultSet> insert(db.executeQuery("insert into t(id,v) values (51,'rolled back')"));
+      require(db.inTransaction(), "a second transaction");
+      unique_ptr<DBResultSet> nested(db.executeQuery("BEGIN"));
+      require(nested && nested->status() == DBResultSetStatus::Error, "a BEGIN inside it fails, in the result set");
+      requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "within a transaction", "and in the database");
+      require(db.inTransaction(), "the transaction is still open");
+      unique_ptr<DBResultSet> rollback(db.executeQuery("ROLLBACK"));
+      require(rollback && rollback->status() == DBResultSetStatus::Done, "ROLLBACK through executeQuery");
+      require(!db.inTransaction(), "closed");
+      requireLongEquals(4, countFromNewConnection(path, "t"), "the rolled back row was never stored");
+   }
+   // and mixed with the other calls
+   require(db.beginTransaction(), "beginTransaction()");
+   {
+      unique_ptr<DBResultSet> insert(db.executeQuery("insert into t(id,v) values (52,'mixed')"));
+      require(insert && insert->status() == DBResultSetStatus::Done, "an executeQuery insert inside it");
+      unique_ptr<DBResultSet> commit(db.executeQuery("COMMIT"));
+      require(!db.inTransaction() && commit && commit->status() == DBResultSetStatus::Done, "committed by executeQuery");
+   }
+   requireLongEquals(5, countFromNewConnection(path, "t"), "stored");
+   db.close();
+}
+
+void TestSQLiteFoundation::test_query_with_result_columns_stays_lazy() {
+   TEST_CASE("test_query_with_result_columns_stays_lazy");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("lazy.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(sqlite3_create_function(db.sqliteHandle(), "bump", 0, SQLITE_UTF8, nullptr,
+                                   sideEffectFunction, nullptr, nullptr) == SQLITE_OK,
+           "register a function with a side effect");
+   require(resetEagerFixture(db), "fixture");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      db.clearCachedStatements();
+
+      // statements that can return rows are not run by executeQuery(), and not by destroying the result set
+      const char* const lazy[] = {
+         "select bump()", "select bump() from t", "values (bump())", "explain select bump()",
+      };
+      for (const char* sql : lazy) {
+         g_sideEffectCalls = 0;
+         unique_ptr<DBResultSet> rs(db.executeQuery(sql));
+         require(rs != nullptr, when + ": a result set for " + sql);
+         require(rs && rs->status() == DBResultSetStatus::Ready, when + ": " + sql + ": Ready, not run");
+         requireLongEquals(0, g_sideEffectCalls, when + ": " + sql + ": the function was not called by executeQuery()");
+         rs.reset();
+         requireLongEquals(0, g_sideEffectCalls, when + ": " + sql + ": nor by destroying the result set unstepped");
+      }
+      {
+         g_sideEffectCalls = 0;
+         unique_ptr<DBResultSet> rs(db.executeQuery("select bump()"));
+         require(rs && rs->next(), when + ": stepped, it runs");
+         requireLongEquals(1, g_sideEffectCalls, when + ": once");
+         require(!rs->next(), when + ": and ends");
+         require(rs->status() == DBResultSetStatus::Done, when + ": Done");
+      }
+      {
+         // a reading PRAGMA and a PRAGMA that sets a value and returns it
+         unique_ptr<DBResultSet> reading(db.executeQuery("pragma user_version"));
+         require(reading && reading->status() == DBResultSetStatus::Ready && reading->next(), when + ": pragma user_version is lazy");
+         unique_ptr<DBResultSet> setting(db.executeQuery("pragma journal_mode = memory"));
+         require(setting && setting->status() == DBResultSetStatus::Ready, when + ": pragma journal_mode = ... returns a row, so it is lazy");
+         // journal_mode is a property of the connection, so it is asked of this one
+         const auto journalMode = [&] {
+            unique_ptr<SQLiteResultSet> mode(openCursor(db, "pragma journal_mode"));
+            return (mode && mode->next()) ? firstText(*mode) : string("(none)");
+         };
+         requireStringEquals("delete", journalMode(), when + ": and has not been run");
+         setting.reset();
+         requireStringEquals("delete", journalMode(), when + ": not by destroying it either");
+         unique_ptr<SQLiteResultSet> run(openCursor(db, "pragma journal_mode = memory"));
+         require(run && run->next(), when + ": stepped, it runs");
+         run.reset();
+         requireStringEquals("memory", journalMode(), when + ": and changed the mode");
+         unique_ptr<SQLiteResultSet> restore(openCursor(db, "pragma journal_mode = delete"));
+         require(restore && restore->next(), when + ": restore the journal mode for the next pass");
+         restore.reset();
+         requireStringEquals("delete", journalMode(), when + ": restored");
+      }
+
+      // RETURNING: lazy, and one step does all of the changes
+      {
+         require(resetEagerFixture(db), when + ": fixture");
+         db.setShouldCacheStatements(pass == 0);
+         const string insertReturning = "insert into t(id,v) values (20,'r1'),(21,'r2'),(22,'r3') returning id";
+         {
+            unique_ptr<DBResultSet> rs(db.executeQuery(insertReturning));
+            require(rs && rs->status() == DBResultSetStatus::Ready, when + ": INSERT ... RETURNING is lazy");
+            requireLongEquals(3, countFromNewConnection(path, "t"), when + ": nothing inserted by executeQuery()");
+         }
+         requireLongEquals(3, countFromNewConnection(path, "t"), when + ": nor by destroying it unstepped");
+
+         unique_ptr<SQLiteResultSet> rs(openCursor(db, insertReturning));
+         require(rs && rs->next(), when + ": one step");
+         requireLongEquals(20, rs ? rs->intForColumnIndex(0) : -1, when + ": returns the first id");
+         requireLongEquals(6, scalar(db, "select count(*) from t"),
+                           when + ": the one step inserted all three rows (seen on this connection)");
+         requireLongEquals(3, countFromNewConnection(path, "t"),
+                           when + ": but another connection sees none while the statement is unfinished");
+         rs.reset();
+         requireLongEquals(6, countFromNewConnection(path, "t"),
+                           when + ": they are committed when the result set is destroyed");
+
+         // consumed to the end: the same
+         require(exec(db, "delete from t where id >= 20"), when + ": cleanup");
+         rs.reset(openCursor(db, insertReturning));
+         int rows = 0;
+         while (rs && rs->next()) {
+            ++rows;
+         }
+         requireLongEquals(3, rows, when + ": three rows returned");
+         require(rs && rs->status() == DBResultSetStatus::Done, when + ": Done");
+         requireLongEquals(6, countFromNewConnection(path, "t"), when + ": committed");
+
+         // UPDATE and DELETE ... RETURNING are lazy too
+         rs.reset(openCursor(db, "update t set v = 'changed' where id = 1 returning v"));
+         require(rs && rs->status() == DBResultSetStatus::Ready, when + ": UPDATE ... RETURNING is lazy");
+         requireStringEquals("a", rawFirstRow(path, "select v from t where id = 1"), when + ": not run");
+         rs.reset();
+         requireStringEquals("a", rawFirstRow(path, "select v from t where id = 1"), when + ": not run by destroying it");
+         rs.reset(openCursor(db, "delete from t where id >= 20 returning id"));
+         require(rs && rs->status() == DBResultSetStatus::Ready, when + ": DELETE ... RETURNING is lazy");
+         requireLongEquals(6, countFromNewConnection(path, "t"), when + ": not run");
+         rs.reset();
+         requireLongEquals(6, countFromNewConnection(path, "t"), when + ": not run by destroying it");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_query_without_result_columns_that_fails() {
+   TEST_CASE("test_query_without_result_columns_that_fails");
+   chapeau_tests::ScopedTempDir dir;
+   const string path = dir.file("eager_failures.sqlite3");
+   SQLiteDatabase db(path);
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+
+   for (int pass = 0; pass < 2; ++pass) {
+      const string when = (pass == 0) ? "cached statements" : "uncached statements";
+      db.setShouldCacheStatements(pass == 0);
+      require(resetEagerFixture(db), when + ": fixture");
+
+      struct Failure {
+         string label;
+         string sql;
+         function<void(DBStatementArgs&)> bindArguments;
+         int code;
+         string message;
+      };
+      const vector<Failure> failures = {
+         {"duplicate key", "insert into t(id,v) values (1,'dup')", nullptr, SQLITE_CONSTRAINT,
+          "UNIQUE constraint failed: t.id"},
+         {"duplicate key with arguments", "insert into t(id,v) values (?,?)",
+          [](DBStatementArgs& a) { a.add(new DBLong(2)); a.add(new DBString("dup")); }, SQLITE_CONSTRAINT,
+          "UNIQUE constraint failed: t.id"},
+         {"NOT NULL", "insert into t(id,v) values (9,null)", nullptr, SQLITE_CONSTRAINT,
+          "NOT NULL constraint failed: t.v"},
+         {"BEGIN inside a transaction", "BEGIN", nullptr, SQLITE_ERROR, "within a transaction"},
+      };
+
+      for (const Failure& f : failures) {
+         const string label = when + ", " + f.label;
+         if (f.label == "BEGIN inside a transaction") {
+            // deferred: another connection can still read while it is open
+            require(db.beginDeferredTransaction(), label + ": open a transaction first");
+         }
+         const long long rowsBefore = countFromNewConnection(path, "t");
+         const vector<string> statementsBefore = openStatementSql(db);
+         DBStatementArgs args;
+         if (f.bindArguments) {
+            f.bindArguments(args);
+         }
+         unique_ptr<DBResultSet> rs(f.bindArguments ? db.executeQuery(f.sql, args) : db.executeQuery(f.sql));
+
+         // a result set, not nullptr: the statement was prepared and bound; it failed running
+         require(rs != nullptr, label + ": a result set (not nullptr)");
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Error, label + ": status is Error at once");
+            requireLongEquals(f.code, rs->lastErrorCode() & 0xff, label + ": the cursor's code");
+            require(rs->lastErrorMessage().find(f.message) != string::npos,
+                    label + ": the cursor's message: '" + rs->lastErrorMessage() + "'");
+         }
+         requireLastError(db, DBErrorKind::Sqlite, rs ? rs->lastErrorCode() : -1, f.message, label + ": the database records it");
+         require(db.lastErrorMessage() == (rs ? rs->lastErrorMessage() : string("(none)")),
+                 label + ": the same message in the database and the cursor");
+
+         // it stays that way
+         for (int i = 0; i < 3 && rs; ++i) {
+            require(!rs->next(), label + ": next() is false");
+         }
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Error, label + ": still Error");
+            require(rs->lastErrorMessage().find(f.message) != string::npos, label + ": with its message");
+         }
+         requireLongEquals(rowsBefore, countFromNewConnection(path, "t"), label + ": nothing was stored");
+         vector<string> expectedStatements = statementsBefore;
+         if (pass == 0 && find(expectedStatements.begin(), expectedStatements.end(), f.sql) == expectedStatements.end()) {
+            expectedStatements.push_back(f.sql);
+            sort(expectedStatements.begin(), expectedStatements.end());
+         }
+         require(openStatementSql(db) == expectedStatements,
+                 label + ": the statement was reset or finalized, not left open: " + describe(openStatementSql(db)));
+
+         // a later success clears the database's error and leaves the cursor's alone
+         unique_ptr<DBResultSet> fine(db.executeQuery("select 1"));
+         requireLastError(db, DBErrorKind::None, 0, "", label + ": cleared by a later success");
+         if (rs) {
+            require(rs->status() == DBResultSetStatus::Error && rs->lastErrorMessage().find(f.message) != string::npos,
+                    label + ": the cursor keeps its error");
+         }
+         if (f.label == "BEGIN inside a transaction") {
+            require(db.rollback(), label + ": close the transaction");
+         }
+      }
+
+      // the statement that failed works afterwards, with data that is valid
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(5));
+         args.add(new DBString("fine"));
+         unique_ptr<DBResultSet> rs(db.executeQuery("insert into t(id,v) values (?,?)", args));
+         require(rs && rs->status() == DBResultSetStatus::Done, when + ": the same SQL works afterwards");
+         requireStringEquals("fine", rawFirstRow(path, "select v from t where id = 5"), when + ": stored at once");
+      }
+
+      // a statement that cannot be prepared or bound is still nullptr
+      {
+         unique_ptr<DBResultSet> bad(db.executeQuery("insert intoo t values (1)"));
+         require(bad == nullptr, when + ": a syntax error is nullptr");
+         requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "syntax error", when + ": syntax error");
+         unique_ptr<DBResultSet> exists(db.executeQuery("create table t(x)"));
+         require(exists == nullptr, when + ": a statement SQLite rejects when preparing it is nullptr");
+         requireLastError(db, DBErrorKind::Sqlite, SQLITE_ERROR, "already exists", when + ": table exists");
+         DBStatementArgs few;
+         few.add(new DBLong(1));
+         unique_ptr<DBResultSet> count(db.executeQuery("insert into t(id,v) values (?,?)", few));
+         require(count == nullptr, when + ": a wrong number of arguments is nullptr");
+         requireLastError(db, DBErrorKind::BindCount, 0, "2 parameter(s) but 1 argument(s)", when + ": count");
+         DBStatementArgs tooLong;
+         tooLong.add(new DBLong(6));
+         tooLong.add(new DBString(TOO_LONG_FOR_LIMIT));
+         unique_ptr<DBResultSet> bind;
+         {
+            ShortValueLimit limit(db);
+            bind.reset(db.executeQuery("insert into t(id,v) values (?,?)", tooLong));
+         }
+         require(bind == nullptr, when + ": a bind failure is nullptr, and the row was not stored");
+         requireLastError(db, DBErrorKind::BindFailed, SQLITE_TOOBIG, "parameter 2", when + ": bind");
+         requireLongEquals(0, countFromNewConnection(path, "t where id = 6"), when + ": nothing stored");
+      }
+   }
+   db.close();
+}
+
+void TestSQLiteFoundation::test_query_without_result_columns_reentrancy() {
+   TEST_CASE("test_query_without_result_columns_reentrancy");
+   chapeau_tests::ScopedTempDir dir;
+   SQLiteDatabase db(dir.file("eager_reentry.sqlite3"));
+   db.setLogsErrors(false);
+   require(db.open(), "open");
+   require(exec(db, "create table u(a integer)") && exec(db, "insert into u(a) values (1)"), "table u");
+   require(exec(db, "create table k(id integer primary key)") && exec(db, "insert into k(id) values (1)"), "table k");
+   g_reentry = Reentry{&db, false, true, DBErrorKind::None, -1, DBErrorKind::RefusedStatement};
+   require(sqlite3_create_function(db.sqliteHandle(), "reenter", 0, SQLITE_UTF8, nullptr,
+                                   reentrantFunction, nullptr, nullptr) == SQLITE_OK,
+           "register a function that uses the database");
+
+   // the function runs while executeQuery() runs the statement: its use of the database is refused ...
+   require(!exec(db, "insert intoo u values (1)"), "an earlier failure");
+   unique_ptr<DBResultSet> ok(db.executeQuery("update u set a = a + reenter()"));
+   require(ok && ok->status() == DBResultSetStatus::Done, "the update ran");
+   require(g_reentry.calledNested && !g_reentry.nestedResult && g_reentry.nestedKind == DBErrorKind::InUse,
+           "the function's own use of the database was refused");
+   require(g_reentry.kindOnEntry == DBErrorKind::None, "and the statement started with no error");
+   requireLastError(db, DBErrorKind::None, 0, "", "the statement succeeded: what the nested call recorded does not stay");
+
+   // ... and when the statement fails, its own error is the one that stays
+   g_reentry.calledNested = false;
+   unique_ptr<DBResultSet> failed(db.executeQuery("insert into k(id) values (reenter())"));
+   require(failed && failed->status() == DBResultSetStatus::Error, "the insert collides");
+   require(g_reentry.calledNested && g_reentry.nestedKind == DBErrorKind::InUse, "the nested call was refused again");
+   requireLastError(db, DBErrorKind::Sqlite, SQLITE_CONSTRAINT, "UNIQUE constraint failed", "its own error stays");
+   db.close();
 }

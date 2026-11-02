@@ -30,6 +30,9 @@ class Date;
  * database it came from is closed or destroyed. status() says which:
  *
  *   new result set                         Ready,       lastErrorCode() 0
+ *     (but a statement without result columns -- INSERT, UPDATE, DELETE,
+ *     DDL, BEGIN -- is run by executeQuery() before it hands the result set
+ *     out, so that one is born Done, or Error with the failure in it)
  *   next() returned true                   Row,         0
  *   data exhausted (next() false)          Done,        0
  *   close() on an active result set        Done,        0
@@ -37,6 +40,14 @@ class Date;
  *                                                       and lastErrorMessage()
  *   database closed or destroyed under an
  *     active result set                    Invalidated, 0
+ *
+ * A statement with result columns (SELECT, VALUES, EXPLAIN, a PRAGMA that
+ * returns a value, and INSERT/UPDATE/DELETE ... RETURNING) runs when it is
+ * stepped, never before and never by closing or destroying the result set. For
+ * RETURNING, the first next() performs all of the statement's changes, however
+ * many rows it returns; whether other connections can see them, and whether
+ * the write lock is still held, is SQLite's until the statement is finished
+ * (the rows are exhausted, or the result set is closed or destroyed).
  *
  * The first of these final states is the one that stays: a result set that
  * already ended as Done or Error is not turned into Invalidated by the
@@ -332,6 +343,12 @@ private:
    // gives up this result set's use of its statement; a statement that is
    // not cached and has no other user is deleted
    void releaseStatement();
+
+   // the one place a statement is stepped: next() calls it, and so does
+   // SQLiteDatabase::executeQuery() for a statement that returns no rows and so
+   // is run before the result set is handed out. 'operation' names the caller
+   // in the report of a failed step.
+   bool advance(const char* operation);
 
    // ends the result set: the first final state wins (see the class comment),
    // then the statement is released

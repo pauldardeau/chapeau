@@ -366,8 +366,28 @@ public:
                               unsigned long& rowsAffectedCount) = 0;
 
    /**
-    * Prepares a query without parameters. The statement is not run until the
-    * result set is stepped (see DBResultSet::next()).
+    * Prepares a statement without parameters and returns its result set.
+    *
+    * When the statement runs depends on whether it has result columns:
+    *  - A statement that has none -- INSERT, UPDATE, DELETE, CREATE, DROP,
+    *    BEGIN, COMMIT, a PRAGMA that only sets a value -- is run, to
+    *    completion, before this returns, because there are no rows to step to.
+    *    The result set is already finished: Done, or Error if the statement
+    *    failed (its lastErrorCode() and lastErrorMessage() say how, and the
+    *    database records the same, see lastErrorKind()); next() is false and
+    *    never runs it again. It is not nullptr: nullptr is only for a
+    *    statement that could not be prepared or bound.
+    *  - A statement that has result columns -- SELECT, VALUES, EXPLAIN, a
+    *    PRAGMA that returns a value, and INSERT/UPDATE/DELETE with RETURNING --
+    *    is not run until the result set is stepped (see DBResultSet::next()),
+    *    and destroying or closing it unstepped does not run it.
+    *    Stepping a RETURNING statement performs the changes: the first step
+    *    does all of them, before every returned row has been read. As far as
+    *    other connections are concerned they are SQLite's to order -- not
+    *    visible, and the write lock is held, until the statement is finished
+    *    (the rows are exhausted, or the result set is closed or destroyed).
+    * To run a statement and not keep a result set, executeUpdate() is the
+    * call for one without rows.
     * @param sql
     * @return the result set, or nullptr if the statement could not be
     * prepared; lastErrorKind() says why
@@ -376,10 +396,13 @@ public:
    virtual DBResultSet* executeQuery(const std::string& sql) = 0;
 
    /**
-    * Prepares a query with parameters. Each argument is bound in order; if the
-    * number of arguments is not the number of parameters (DBErrorKind::BindCount),
-    * or one cannot be bound (DBErrorKind::BindFailed), nothing is run and there
-    * is no result set: it is never run with a parameter left unbound (NULL).
+    * Prepares a statement with parameters and returns its result set. Each
+    * argument is bound in order; if the number of arguments is not the number
+    * of parameters (DBErrorKind::BindCount), or one cannot be bound
+    * (DBErrorKind::BindFailed), nothing is run and there is no result set: it
+    * is never run with a parameter left unbound (NULL). A statement without
+    * result columns is run before this returns, and one with result columns is
+    * run by stepping the result set, exactly as for the overload above.
     * @param sql
     * @param args
     * @return the result set, or nullptr; lastErrorKind() says why

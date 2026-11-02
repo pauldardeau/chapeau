@@ -220,8 +220,15 @@ std::vector<OperationResult> failingOperations(bool logErrors) {
       unsigned long rows = 99;
       return outcome(db.executeUpdate("insert into w(id,v) values (1,'dup')", rows), db);
    });
-   run("constraint through a result set", [&] {
+   run("constraint through executeQuery", [&] {
+      // no result columns: the statement is run before executeQuery() returns
       std::unique_ptr<DBResultSet> rs(db.executeQuery("insert into w(id,v) values (1,'dup')"));
+      const bool row = rs && rs->next();
+      return outcome(row, db) + "|cursor:" + std::to_string(rs ? rs->lastErrorCode() : -1) + ":" +
+             (rs ? rs->lastErrorMessage() : std::string("(none)"));
+   });
+   run("failure while stepping a result set", [&] {
+      std::unique_ptr<DBResultSet> rs(db.executeQuery("select abs(-9223372036854775807 - 1)"));
       const bool row = rs && rs->next();
       return outcome(row, db) + "|cursor:" + std::to_string(rs ? rs->lastErrorCode() : -1) + ":" +
              (rs ? rs->lastErrorMessage() : std::string("(none)"));
@@ -263,8 +270,19 @@ std::vector<OperationResult> failingOperations(bool logErrors) {
       return outcome(row, db) + "|cursor:" + std::to_string(rs ? rs->lastErrorCode() : -1) + ":" +
              (rs ? rs->lastErrorMessage() : std::string("(none)"));
    });
+   run("busy while preparing a statement without result columns", [&] {
+      std::unique_ptr<DBResultSet> rs(db.executeQuery("insert into w(id,v) values (9,'z')"));
+      const bool row = rs && rs->next();
+      return outcome(row, db) + "|cursor:" + std::to_string(rs ? rs->lastErrorCode() : -1) + ":" +
+             (rs ? rs->lastErrorMessage() : std::string("(none)")) + ":" +
+             std::to_string(rs ? static_cast<int>(rs->status()) : -1);
+   });
    locker.rollback();
 
+   run("success through executeQuery", [&] {
+      std::unique_ptr<DBResultSet> rs(db.executeQuery("update w set v = 'three' where id = 1"));
+      return outcome(rs && rs->status() == DBResultSetStatus::Done, db);
+   });
    run("success", [&] {
       unsigned long rows = 99;
       return outcome(db.executeUpdate("update w set v = 'two' where id = 1", rows), db);
@@ -1023,7 +1041,8 @@ std::map<std::string, Scenario> scenarios() {
          {"bind count", "DB Error [BindCount]: the statement has 2 parameter(s) but 1 argument(s) were given in executeUpdate: insert into w(id,v) values (?,?)"},
          {"refused statement", "DB Error [RefusedStatement]: the statement returns rows and was not run; use executeQuery in executeUpdate: select 1"},
          {"constraint through executeUpdate", "DB Error [Sqlite] code=19: UNIQUE constraint failed: w.id in executeUpdate: insert into w(id,v) values (1,'dup')"},
-         {"constraint through a result set", "DB Error [Sqlite] code=19: UNIQUE constraint failed: w.id in next(): insert into w(id,v) values (1,'dup')"},
+         {"constraint through executeQuery", "DB Error [Sqlite] code=19: UNIQUE constraint failed: w.id in executeQuery: insert into w(id,v) values (1,'dup')"},
+         {"failure while stepping a result set", "DB Error [Sqlite] code=1: integer overflow in next(): select abs(-9223372036854775807 - 1)"},
          {"nested transaction", "DB Error [Sqlite] code=1: cannot start a transaction within a transaction in executeUpdate: BEGIN EXCLUSIVE TRANSACTION;"},
          {"commit without a transaction", "DB Error [Sqlite] code=1: cannot commit - no transaction is active in executeUpdate: COMMIT TRANSACTION;"},
          {"open twice", "DB Error [AlreadyOpen]: the database is already open; the connection is unchanged in open"},
@@ -1031,6 +1050,7 @@ std::map<std::string, Scenario> scenarios() {
          {"open failure", "DB Error [Sqlite] code=14: unable to open database file in open: "},
          {"busy through executeUpdate", "DB Error [Sqlite] code=5: database is locked (gave up after waiting 100 ms) in executeUpdate: insert into w(id,v) values (9,'z')"},
          {"busy through a result set", "DB Error [Sqlite] code=5: database is locked (gave up after waiting 100 ms) in next(): select id from w"},
+         {"busy while preparing a statement without result columns", "DB Error [Sqlite] code=5: database is locked (gave up after waiting 100 ms) in executeQuery: insert into w(id,v) values (9,'z')"},
       };
 
       for (const OperationResult& r : results) {
@@ -1046,7 +1066,7 @@ std::map<std::string, Scenario> scenarios() {
                r.output.find(it->second) != std::string::npos);
          std::printf("      logged: %s", r.output.c_str());
       }
-      checkLong("every failing operation was exercised", 13, static_cast<long long>(expected.size()));
+      checkLong("every failing operation was exercised", 15, static_cast<long long>(expected.size()));
    };
 
    s["errors_silent_when_logging_is_off"] = [] {
@@ -1104,6 +1124,107 @@ std::map<std::string, Scenario> scenarios() {
       check("which clears the error", b.lastErrorKind() == DBErrorKind::None && b.lastErrorCode() == 0 &&
                                       b.lastErrorMessage().empty());
       checkLong("the row is there", 1, scalar(a, "select count(*) from t where id = 9"));
+   };
+
+
+   // ===================== CH-18: a statement without result columns runs when executeQuery() returns =====================
+   // executeQuery() used to hand back a lazy result set for an INSERT, UPDATE,
+   // DELETE, DDL or BEGIN as for a SELECT. If the caller never called next()
+   // -- the natural thing to do with a statement that has no rows -- it never
+   // ran, and nothing said so.
+
+   s["ch18_query_without_columns_never_stepped"] = [] {
+      defect("CH-18", "executeQuery() of a statement without result columns never ran it unless the caller stepped");
+      SQLiteDatabase db(g_path);
+      openDb(db);
+      insert3(db);
+      SQLiteDatabase other(g_path);   // an independent connection: what is really stored
+      check("an independent connection opens", other.open());
+      other.setShouldCacheStatements(false);
+
+      {
+         std::unique_ptr<DBResultSet> rs(db.executeQuery("insert into t(id,v) values (10,'x')"));
+         check("INSERT: a result set", rs != nullptr);
+         checkLong("INSERT: already stored when executeQuery() returned", 4, scalar(other, "select count(*) from t"));
+         check("INSERT: status is Done", rs && rs->status() == DBResultSetStatus::Done);
+         check("INSERT: next() is false", rs && !rs->next());
+         check("INSERT: next() is false again", rs && !rs->next());
+         checkLong("INSERT: and was not run again", 4, scalar(other, "select count(*) from t"));
+      }   // destroyed without ever being stepped
+      checkLong("INSERT: nor by destroying the result set", 4, scalar(other, "select count(*) from t"));
+
+      {
+         DBStatementArgs args;
+         args.add(new DBLong(11));
+         args.add(new DBString("y"));
+         std::unique_ptr<DBResultSet> rs(db.executeQuery("insert into t(id,v) values (?,?)", args));
+         check("INSERT with arguments: Done", rs && rs->status() == DBResultSetStatus::Done);
+      }
+      checkLong("INSERT with arguments: stored, the result set having been ignored", 5, scalar(other, "select count(*) from t"));
+
+      { std::unique_ptr<DBResultSet> ignored(db.executeQuery("update t set v = 'changed'")); }
+      checkLong("UPDATE: ran, with the result ignored", 5, scalar(other, "select count(*) from t where v = 'changed'"));
+
+      { std::unique_ptr<DBResultSet> rs(db.executeQuery("delete from t where id > 3")); }
+      checkLong("DELETE: ran, never stepped", 3, scalar(other, "select count(*) from t"));
+
+      { std::unique_ptr<DBResultSet> rs(db.executeQuery("create table made(a integer)")); }
+      checkLong("CREATE TABLE: ran, never stepped", 1, scalar(other, "select count(*) from sqlite_master where name = 'made'"));
+
+      {
+         std::unique_ptr<DBResultSet> rs(db.executeQuery("BEGIN"));
+         check("BEGIN: the transaction is open when executeQuery() returns", db.inTransaction());
+      }
+      { std::unique_ptr<DBResultSet> rs(db.executeQuery("COMMIT")); }
+      check("COMMIT: closed", !db.inTransaction());
+
+      // a failure shows in the result set that comes back, and in the database
+      std::unique_ptr<DBResultSet> dup(db.executeQuery("insert into t(id,v) values (1,'dup')"));
+      check("a failing INSERT still returns a result set", dup != nullptr);
+      check("which is already in Error", dup && dup->status() == DBResultSetStatus::Error);
+      checkLong("with SQLite's code", SQLITE_CONSTRAINT, dup ? (dup->lastErrorCode() & 0xff) : -1);
+      check("and SQLite's message", dup && dup->lastErrorMessage().find("UNIQUE constraint failed") != std::string::npos);
+      check("the database recorded it", db.lastErrorKind() == DBErrorKind::Sqlite);
+      check("without a second run", scalar(other, "select count(*) from t") == 3);
+   };
+
+   // The failure of an eager statement because another connection holds the lock:
+   // bounded by the busy timeout, in the result set that comes back, and gone once
+   // the lock is. The other connection has a write pending (it holds the RESERVED
+   // lock), so that preparing the statement works and it is running it that finds
+   // the database busy.
+   s["errors_eager_busy_failure"] = [] {
+      SQLiteDatabase a(g_path);
+      a.setLogsErrors(false);
+      openDb(a);
+      insert3(a);
+      SQLiteDatabase b(g_path);
+      b.setLogsErrors(false);
+      check("second connection opens", b.open());
+      b.setBusyRetryTimeout(100);
+
+      check("a transaction with a write pending", a.beginDeferredTransaction());
+      unsigned long written = 0;
+      check("the write", a.executeUpdate("insert into t(id,v) values (8,'a')", written));
+
+      const long long start = nowMs();
+      std::unique_ptr<DBResultSet> rs(b.executeQuery("insert into t(id,v) values (9,'z')"));
+      const long long waited = nowMs() - start;
+      check("executeQuery() returns a result set, not nullptr", rs != nullptr);
+      check("which is already in Error", rs && rs->status() == DBResultSetStatus::Error);
+      checkLong("SQLITE_BUSY", SQLITE_BUSY, rs ? rs->lastErrorCode() : -1);
+      check("with SQLite's message", rs && rs->lastErrorMessage() == "database is locked");
+      check("the database recorded the same", b.lastErrorKind() == DBErrorKind::Sqlite && b.lastErrorCode() == SQLITE_BUSY &&
+                                              b.lastErrorMessage() == "database is locked");
+      check("it waited for the busy timeout, and no longer", waited >= 50 && waited < 5000);
+      check("next() does not try again", rs && !rs->next() && rs->status() == DBResultSetStatus::Error);
+
+      check("rollback", a.rollback());
+      check("the error stays with the result set", rs && rs->lastErrorMessage() == "database is locked");
+      std::unique_ptr<DBResultSet> again(b.executeQuery("insert into t(id,v) values (9,'z')"));
+      check("the same statement runs once the lock is gone", again && again->status() == DBResultSetStatus::Done);
+      check("which clears the database's error", b.lastErrorKind() == DBErrorKind::None);
+      checkLong("and the row is there, once", 1, scalar(a, "select count(*) from t where id = 9"));
    };
 
    return s;

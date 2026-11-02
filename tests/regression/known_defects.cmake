@@ -53,4 +53,7 @@ set(CHAPEAU_FIXED_TABLE
    # CH-21 (H1a-7a): executeUpdate() refuses a statement that returns rows instead of
    # asserting
    "CH-21|ch21_select_in_executeupdate|60|executeUpdate() asserts when the statement returns rows"
+   # CH-18 (H1a-9): executeQuery() runs a statement that has no result columns before
+   # it returns, instead of leaving it to a next() that nobody calls
+   "CH-18|ch18_query_without_columns_never_stepped|60|executeQuery() never ran INSERT/UPDATE/DELETE/DDL unless the result set was stepped"
 )

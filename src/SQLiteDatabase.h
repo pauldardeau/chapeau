@@ -219,6 +219,11 @@ private:
                          sqlite3_stmt** ppStmt,
                          const char* operation);
 
+   // The result set for a statement that is ready to run (prepared, with its
+   // arguments bound). Runs the statement first if it has no result columns,
+   // see executeQuery().
+   DBResultSet* openResultSet(SQLiteStatement* statement, const std::string& sql);
+
    // executeUpdate() runs statements that do not return rows. Returns true, after
    // recording it, if pStmt has result columns and so must not be run; the
    // statement is finalized unless the cache owns it.
