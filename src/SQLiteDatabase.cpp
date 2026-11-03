@@ -744,13 +744,13 @@ bool SQLiteDatabase::bindInt(int value, int idx, DBStatement* statement) {
 
 //******************************************************************************
 
-bool SQLiteDatabase::bindLong(long value, int idx, DBStatement* statement) {
+bool SQLiteDatabase::bindLong(std::int64_t value, int idx, DBStatement* statement) {
    SQLiteStatement* stmt = dynamic_cast<SQLiteStatement*>(statement);
    if (!stmt || !stmt->statement()) {
       return noStatementToBind();
    }
 
-   return bindResult(::sqlite3_bind_int64(stmt->statement(), idx, value));
+   return bindResult(::sqlite3_bind_int64(stmt->statement(), idx, static_cast<sqlite3_int64>(value)));
 }
 
 //******************************************************************************

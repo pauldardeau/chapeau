@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "scoped_temp_dir.h"
@@ -145,6 +147,7 @@ void TestSQLiteFoundation::runTests() {
    test_boolean_conversion_of_wide_integers();
    test_float_binding_is_exact_promotion();
    test_legacy_result_set_subclass_still_works();
+   test_64_bit_integers_round_trip();
    test_execute_update_refuses_row_returning_statements();
    test_bind_failure_fails_the_call();
    test_argument_count_mismatch_is_reported();
@@ -2821,7 +2824,7 @@ int expectedSaturated(long long value) {
 // the checked intForColumn()), as a subclass written before them would
 class LegacyResultSet : public DBResultSet {
 public:
-   long storedLong;
+   int64_t storedLong;
    DBValueType storedType;
    LegacyResultSet() : storedLong(0), storedType(ValueTypeInteger) {}
 
@@ -2829,8 +2832,8 @@ public:
    void close() {}
    int intForColumn(const string&) const { return static_cast<int>(storedLong); }
    int intForColumnIndex(int) const { return static_cast<int>(storedLong); }
-   long longForColumn(const string&) const { return storedLong; }
-   long longForColumnIndex(int) const { return storedLong; }
+   int64_t longForColumn(const string&) const { return storedLong; }
+   int64_t longForColumnIndex(int) const { return storedLong; }
    bool boolForColumn(const string&) const { return storedLong != 0; }
    bool boolForColumnIndex(int) const { return storedLong != 0; }
    double doubleForColumn(const string&) const { return 0; }
@@ -3385,6 +3388,13 @@ void TestSQLiteFoundation::test_legacy_result_set_subclass_still_works() {
    legacy.storedType = ValueTypeInteger;
    requireLongEquals(123456, base.int64ForColumnIndex(0), "int64 defaults to the long accessor (index)");
    requireLongEquals(123456, base.int64ForColumn("any"), "int64 defaults to the long accessor (name)");
+   // a value that does not fit in 32 bits goes through the default untouched
+   legacy.storedLong = 4294967296LL;
+   requireLongEquals(4294967296LL, base.int64ForColumnIndex(0), "int64 default keeps all 64 bits (index)");
+   requireLongEquals(4294967296LL, base.int64ForColumn("any"), "int64 default keeps all 64 bits (name)");
+   legacy.storedLong = INT64_MIN;
+   requireLongEquals(INT64_MIN, base.int64ForColumnIndex(0), "int64 default keeps INT64_MIN");
+   legacy.storedLong = 123456;
    int value = 99;
    require(base.intForColumnIndex(0, value), "the checked accessor works on top of getTypeForColumnIndex()");
    requireLongEquals(123456, value, "with the value");
@@ -5849,7 +5859,7 @@ void TestSQLiteFoundation::test_inuse_marker_survives_a_cursor_ending() {
    unique_ptr<SQLiteResultSet> other(openCursor(db, ITEMS_BY_ID));
    require(other && other->next(), "a result set that is live");
    require(other->status() == DBResultSetStatus::Row, "positioned on a row");
-   const long idBefore = other->longForColumnIndex(0);
+   const int64_t idBefore = other->longForColumnIndex(0);
 
    g_inUseProbe = InUseProbe();
    g_inUseProbe.db = &db;
@@ -6166,4 +6176,167 @@ void TestSQLiteFoundation::test_accessors_by_name_and_by_index_agree() {
    require(rs->stringForColumn("t") == nullptr && rs->stringForColumnIndex(2) == nullptr, "after close(): no string");
    require(rs->dataForColumn("b") == nullptr && rs->dateForColumn("r") == nullptr, "after close(): no data, no date");
    requireLongEquals(0, rs->getColumnCount(), "after close(): no columns");
+}
+
+// ---- H1a-12h-1: 64-bit integers are 64 bits wide on every platform ----------------------------------
+//
+// DBLong, bindLong() and longForColumn*() used to be written in terms of a C++ long, which is 32 bits
+// on Windows: DBLong(4294967296) held 0 before SQLite ever saw it. The declarations are checked at
+// compile time (this fails to COMPILE with the original headers on a platform whose long is 32 bits),
+// and the values at run time.
+
+static_assert(sizeof(decltype(std::declval<const DBLong&>().value())) == 8,
+              "DBLong holds 64 bits");
+static_assert(is_same<decltype(std::declval<const DBLong&>().value()), int64_t>::value,
+              "DBLong::value() is an int64_t");
+static_assert(is_same<decltype(&SQLiteDatabase::bindLong), bool (SQLiteDatabase::*)(int64_t, int, DBStatement*)>::value,
+              "bindLong takes an int64_t");
+static_assert(is_same<decltype(std::declval<const SQLiteResultSet&>().longForColumnIndex(0)), int64_t>::value,
+              "longForColumnIndex returns an int64_t");
+static_assert(is_same<decltype(std::declval<const SQLiteResultSet&>().longForColumn(std::string())), int64_t>::value,
+              "longForColumn returns an int64_t");
+static_assert(is_same<decltype(std::declval<const DBResultSet&>().longForColumnIndex(0)), int64_t>::value,
+              "DBResultSet::longForColumnIndex returns an int64_t");
+static_assert(is_same<decltype(std::declval<const DBResultSet&>().int64ForColumnIndex(0)),
+                      decltype(std::declval<const DBResultSet&>().longForColumnIndex(0))>::value,
+              "the two accessors have one type");
+
+namespace {
+
+struct WideValue {
+   int64_t value;
+   const char* text;       // the exact decimal text of the value
+};
+
+// the boundary values of the 64-bit integer, written out so that no arithmetic can hide a mistake
+const WideValue WIDE_VALUES[] = {
+   { 0,                                  "0" },
+   { 1,                                  "1" },
+   { -1,                                 "-1" },
+   { INT32_MAX,                          "2147483647" },
+   { INT32_MIN,                          "-2147483648" },
+   { static_cast<int64_t>(INT32_MAX) + 1, "2147483648" },
+   { static_cast<int64_t>(INT32_MIN) - 1, "-2147483649" },
+   { 4294967296LL,                       "4294967296" },
+   { -4294967296LL,                      "-4294967296" },
+   { INT64_MAX,                          "9223372036854775807" },
+   { INT64_MIN,                          "-9223372036854775808" }
+};
+
+}
+
+void TestSQLiteFoundation::test_64_bit_integers_round_trip() {
+   TEST_CASE("test_64_bit_integers_round_trip");
+
+   // 1. DBLong itself: the value, and its text (a 20-byte buffer cannot hold INT64_MIN and its NUL)
+   for (const WideValue& wide : WIDE_VALUES) {
+      const DBLong holder(wide.value);
+      const string label = string("DBLong(") + wide.text + ")";
+      requireLongEquals(wide.value, holder.value(), label + ".value()");
+      requireStringEquals(wide.text, holder.valueAsString(), label + ".valueAsString()");
+      DBLong copy(holder);
+      requireLongEquals(wide.value, copy.value(), label + " copied");
+      DBLong assigned(0);
+      assigned = holder;
+      requireLongEquals(wide.value, assigned.value(), label + " assigned");
+   }
+
+   // 2. through a bound parameter into SQLite, and back by every accessor -- with the statement
+   //    cache on (the second round reuses the cached statements) and off
+   for (int cached = 1; cached >= 0; --cached) {
+      for (int round = 0; round < 2; ++round) {
+         const string mode = string(cached ? "cached" : "uncached") + ", round " + to_string(round + 1);
+         SQLiteDatabase db(":memory:");
+         db.setLogsErrors(false);
+         db.setShouldCacheStatements(cached != 0);
+         require(db.open(), mode + ": open");
+         require(exec(db, "create table wide(id integer primary key, v integer)"), mode + ": create");
+
+         for (int pass = 0; pass < (cached ? 2 : 1); ++pass) {
+            // the same insert statement, executed again on the second pass when it is cached
+            for (const WideValue& wide : WIDE_VALUES) {
+               const string label = mode + ", " + wide.text;
+               DBStatementArgs args;
+               args.add(new DBLong(pass * 1000 + static_cast<int>(&wide - WIDE_VALUES)));
+               args.add(new DBLong(wide.value));
+               unsigned long rows = 0;
+               require(db.executeUpdate("insert into wide(id, v) values (?, ?)", args, rows), label + ": insert");
+               requireLongEquals(1, rows, label + ": one row");
+            }
+         }
+
+         for (int pass = 0; pass < (cached ? 2 : 1); ++pass) {
+            for (const WideValue& wide : WIDE_VALUES) {
+               const string label = mode + ", " + wide.text;
+               const long long id = pass * 1000 + static_cast<int>(&wide - WIDE_VALUES);
+
+               // SQLite's own view of what was stored, as text, without Chapeau's read API
+               {
+                  unique_ptr<DBResultSet> rs(db.executeQuery(
+                     "select cast(v as text), typeof(v) from wide where id = " + to_string(id)));
+                  require(rs && rs->next(), label + ": stored row");
+                  if (rs) {
+                     string text, type;
+                     require(rs->stringForColumnIndex(0, text), label + ": stored text");
+                     require(rs->stringForColumnIndex(1, type), label + ": stored type");
+                     requireStringEquals(wide.text, text, label + ": SQLite holds exactly this integer");
+                     requireStringEquals("integer", type, label + ": as an INTEGER");
+                  }
+               }
+
+               // read back by index and by name, as long and as int64
+               {
+                  DBStatementArgs args;
+                  args.add(new DBLong(id));
+                  unique_ptr<DBResultSet> rs(db.executeQuery("select v, v as named from wide where id = ?", args));
+                  require(rs && rs->next(), label + ": row");
+                  if (rs) {
+                     requireLongEquals(wide.value, rs->longForColumnIndex(0), label + ": longForColumnIndex");
+                     requireLongEquals(wide.value, rs->longForColumn("named"), label + ": longForColumn by name");
+                     requireLongEquals(wide.value, rs->int64ForColumnIndex(0), label + ": int64ForColumnIndex");
+                     requireLongEquals(wide.value, rs->int64ForColumn("named"), label + ": int64ForColumn by name");
+                     // the interface type as well as the concrete one
+                     const DBResultSet& base = *rs;
+                     requireLongEquals(wide.value, base.longForColumnIndex(0), label + ": DBResultSet::longForColumnIndex");
+                     requireLongEquals(wide.value, base.longForColumn("v"), label + ": DBResultSet::longForColumn");
+                  }
+               }
+            }
+         }
+
+         // a bound parameter in a query, which never goes through a table (the cache again: same SQL twice)
+         for (int pass = 0; pass < 2; ++pass) {
+            for (const WideValue& wide : WIDE_VALUES) {
+               const string label = mode + ", select ?, " + wide.text;
+               DBStatementArgs args;
+               args.add(new DBLong(wide.value));
+               unique_ptr<DBResultSet> rs(db.executeQuery("select ? as v", args));
+               require(rs && rs->next(), label + ": row");
+               if (rs) {
+                  requireLongEquals(wide.value, rs->longForColumnIndex(0), label + ": longForColumnIndex");
+                  requireLongEquals(wide.value, rs->longForColumn("v"), label + ": longForColumn");
+                  requireLongEquals(wide.value, rs->int64ForColumnIndex(0), label + ": int64ForColumnIndex");
+                  requireLongEquals(wide.value, rs->int64ForColumn("v"), label + ": int64ForColumn");
+               }
+            }
+         }
+      }
+   }
+
+   // 3. unchanged behaviour at the edges: NULL, a column that does not exist, a result set that has ended
+   {
+      SQLiteDatabase db(":memory:");
+      db.setLogsErrors(false);
+      require(db.open(), "open");
+      unique_ptr<SQLiteResultSet> rs(dynamic_cast<SQLiteResultSet*>(db.executeQuery("select null as n, 5 as five")));
+      require(rs && rs->next(), "a row");
+      if (rs) {
+         requireLongEquals(0, rs->longForColumnIndex(0), "NULL reads as 0 (long, index)");
+         requireLongEquals(0, rs->longForColumn("n"), "NULL reads as 0 (long, name)");
+         requireLongEquals(0, rs->longForColumn("no_such_column"), "an unknown column reads as 0");
+         requireLongEquals(5, rs->longForColumn("five"), "a small value is unchanged");
+         rs->close();
+         requireLongEquals(0, rs->longForColumnIndex(1), "a closed result set reads as 0");
+      }
+   }
 }

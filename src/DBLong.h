@@ -1,7 +1,8 @@
 #ifndef CHAPEAU_LONG_H
 #define CHAPEAU_LONG_H
 
-#include <stdio.h>
+#include <cstdint>
+#include <string>
 
 #include "DBAbstractDataType.h"
 #include "Database.h"
@@ -9,10 +10,15 @@
 
 namespace chapeau {
 
+/**
+ * A SQLite INTEGER argument, 64 bits wide on every platform. (It used to hold a
+ * C++ long, which is 32 bits on Windows: a value above 2^31 - 1 was silently
+ * truncated before it reached SQLite. The name is unchanged.)
+ */
 class DBLong : public DBAbstractDataType {
 
 public:
-   DBLong(long value) :
+   DBLong(std::int64_t value) :
       DBAbstractDataType(std::string("Long")),
       m_value(value) {
    }
@@ -35,14 +41,13 @@ public:
       return *this;
    }
 
-   long value() const {
+   std::int64_t value() const {
       return m_value;
    }
 
    std::string valueAsString() const {
-      char buffer[20];
-      snprintf(buffer, 20, "%ld", m_value);
-      return std::string(buffer);
+      // (a fixed 20-byte buffer could not hold INT64_MIN, 20 characters, and its NUL)
+      return std::to_string(static_cast<long long>(m_value));
    }
 
    bool bind(Database* db, int idx, DBStatement* statement) const {
@@ -54,11 +59,10 @@ public:
    }
 
 private:
-   long m_value;
+   std::int64_t m_value;
 
 };
 
 }
 
 #endif
-

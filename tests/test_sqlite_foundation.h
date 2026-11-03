@@ -103,6 +103,7 @@ protected:
    void test_boolean_conversion_of_wide_integers();
    void test_float_binding_is_exact_promotion();
    void test_legacy_result_set_subclass_still_works();
+   void test_64_bit_integers_round_trip();
    void test_execute_update_refuses_row_returning_statements();
    void test_bind_failure_fails_the_call();
    void test_argument_count_mismatch_is_reported();

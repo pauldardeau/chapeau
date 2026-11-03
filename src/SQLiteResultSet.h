@@ -257,14 +257,14 @@ public:
     * @param columnName
     * @return
     */
-   long longForColumn(const std::string& columnName) const;
+   std::int64_t longForColumn(const std::string& columnName) const;
 
    /**
     *
     * @param columnIdx
     * @return
     */
-   long longForColumnIndex(int columnIdx) const;
+   std::int64_t longForColumnIndex(int columnIdx) const;
 
    /**
     *
@@ -408,7 +408,7 @@ private:
    int intForColumnIndexInternal(int columnIdx) const;
    bool intForColumnIndexInternal(int columnIdx, int& value) const;
    std::int64_t int64ForColumnIndexInternal(int columnIdx) const;
-   long longForColumnIndexInternal(int columnIdx) const;
+   std::int64_t longForColumnIndexInternal(int columnIdx) const;
    double doubleForColumnIndexInternal(int columnIdx) const;
    std::string* stringForColumnIndexInternal(int columnIdx) const;
    bool stringForColumnIndexInternal(int columnIdx, std::string& columnValue) const;

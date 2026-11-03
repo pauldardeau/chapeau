@@ -128,6 +128,14 @@ Chapeau is organized around a small set of pieces, mirroring FMDB's design:
 
 ### Values
 
+- **64-bit integers.** SQLite integers are 64 bits wide, and so is every integer
+  that Chapeau passes to or from them as a "long": `DBLong` holds, and
+  `Database::bindLong()` takes, an `std::int64_t`; `longForColumn()` and
+  `longForColumnIndex()` return one, exactly like `int64ForColumn()` /
+  `int64ForColumnIndex()` (the names are historical). Earlier versions used a C++
+  `long`, which is 32 bits on Windows, where `DBLong(4294967296)` silently held `0`.
+  `intForColumn()` still returns an `int` (saturating) and the `int`-and-`bool`
+  accessors are unchanged.
 - **`DBDate`** — a date/time bind value and result-set column type,
   built on chaudière's `DateTime`.
 - **`DBData`** — a raw byte-buffer bind value and result-set column type,
@@ -304,9 +312,22 @@ written out in the comment of `Database` in `Database.h`; in short:
 - None of this makes concurrent use supported, and a program that relies on
   refusals is incorrect. A refusal means a call did not happen.
 
-**ABI.** The `Database` and `SQLiteResultSet` objects each gained one member (a
-reference to the connection state they share). The change adds no virtual
-function, but the object layouts changed: rebuild everything that uses Chapeau.
+**ABI.** Rebuild everything that uses Chapeau; two changes alter the binary interface.
+
+- *Object layouts.* `Database` and `SQLiteResultSet` each gained one member (a
+  reference to the connection state they share), and `SQLiteDatabase` gained a
+  private one (a flag and a copy of the error record, used to put the error
+  snapshot back after a refused re-entrant call). No virtual function was added.
+- *64-bit integers.* `DBLong`, `Database::bindLong()` and `longForColumn()` /
+  `longForColumnIndex()` take and return `std::int64_t` instead of `long` (see
+  *64-bit integers* above). On LP64 Linux `std::int64_t` *is* `long`, so nothing
+  changes there, not even the symbol names. Where `long` is 32 bits (Windows)
+  the old signatures truncated; where `std::int64_t` is `long long` (macOS) the
+  symbol names change. **A subclass of `Database` or `DBResultSet` that
+  overrides `bindLong(long, ...)` or `longForColumn*()` returning `long` must be
+  changed to `std::int64_t`** on those platforms. It fails to compile, loudly: the
+  compiler rejects the conflicting return type of `longForColumn*()` (MSVC C2555) and
+  reports a class that no longer overrides `bindLong()` as abstract.
 
 Testing
 -------

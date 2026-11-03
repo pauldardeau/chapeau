@@ -447,14 +447,15 @@ public:
                         DBStatement* statement) = 0;
 
    /**
-    *
+    * Binds a 64-bit integer (the name is historical: the value used to be a C++ long,
+    * which is 32 bits on Windows).
     * @param value
     * @param idx
     * @param statement
     * @return
     * @see DBStatement()
     */
-   virtual bool bindLong(long value,
+   virtual bool bindLong(std::int64_t value,
                          int idx,
                          DBStatement* statement) = 0;
 
@@ -892,9 +893,9 @@ public:
    virtual int intForColumnIndex(int columnIdx) const = 0;
 
    /**
-    * The column as a 64-bit integer, whatever the platform's long is.
-    * The default implementation forwards to longForColumn(); a subclass whose
-    * values can be wider than long overrides it.
+    * The column as a 64-bit integer. longForColumn() returns the same type (it used
+    * to return a C++ long, which is 32 bits on Windows); this default implementation
+    * forwards to it.
     * @param columnName
     * @return
     */
@@ -928,18 +929,19 @@ public:
    virtual bool intForColumnIndex(int columnIdx, int& value) const;
 
    /**
-    *
+    * The column as a 64-bit integer (the name is historical: this used to return a C++ long,
+    * which is 32 bits on Windows and truncated large values). Same as int64ForColumn().
     * @param columnName
     * @return
     */
-   virtual long longForColumn(const std::string& columnName) const = 0;
+   virtual std::int64_t longForColumn(const std::string& columnName) const = 0;
 
    /**
-    *
+    * The column as a 64-bit integer (see longForColumn).
     * @param columnIdx
     * @return
     */
-   virtual long longForColumnIndex(int columnIdx) const = 0;
+   virtual std::int64_t longForColumnIndex(int columnIdx) const = 0;
 
    /**
     *

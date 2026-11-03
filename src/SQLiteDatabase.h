@@ -114,7 +114,7 @@ public:
    bool bindDate(const DBDate* value, int idx, DBStatement* statement);
    bool bindBool(bool value, int idx, DBStatement* statement);
    bool bindInt(int value, int idx, DBStatement* statement);
-   bool bindLong(long value, int idx, DBStatement* statement);
+   bool bindLong(std::int64_t value, int idx, DBStatement* statement);
    bool bindFloat(float value, int idx, DBStatement* statement);
    bool bindDouble(double value, int idx, DBStatement* statement);
    bool bindString(const std::string& value, int idx, DBStatement* statement);

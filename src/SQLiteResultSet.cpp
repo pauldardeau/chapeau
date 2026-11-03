@@ -442,7 +442,7 @@ bool SQLiteResultSet::intForColumnIndexInternal(int columnIdx, int& value) const
 
 //******************************************************************************
 
-long SQLiteResultSet::longForColumn(const std::string& columnName) const {
+std::int64_t SQLiteResultSet::longForColumn(const std::string& columnName) const {
    UnitClaim claim(m_unit.get(), "longForColumn");
    if (!claim.ok()) {
       return 0;
@@ -459,7 +459,7 @@ long SQLiteResultSet::longForColumn(const std::string& columnName) const {
 
 //******************************************************************************
 
-long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
+std::int64_t SQLiteResultSet::longForColumnIndex(int columnIdx) const {
    UnitClaim claim(m_unit.get(), "longForColumnIndex");
    if (!claim.ok()) {
       return 0;
@@ -470,13 +470,13 @@ long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
 
 //******************************************************************************
 
-long SQLiteResultSet::longForColumnIndexInternal(int columnIdx) const {
+std::int64_t SQLiteResultSet::longForColumnIndexInternal(int columnIdx) const {
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
    }
 
-   return (long)sqlite3_column_int64(stmt, columnIdx);
+   return static_cast<std::int64_t>(sqlite3_column_int64(stmt, columnIdx));
 }
 
 //******************************************************************************
