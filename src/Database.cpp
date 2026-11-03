@@ -163,6 +163,11 @@ bool Database::shouldCacheStatements() const {
 //******************************************************************************
 
 void Database::setShouldCacheStatements(bool value) {
+   UnitClaim claim(unitStatePtr(), "setShouldCacheStatements");
+   if (!claim.ok()) {
+      return;
+   }
+
    m_shouldCacheStatements = value;
 
    if (!value) {
@@ -179,6 +184,11 @@ std::size_t Database::statementCacheLimit() const {
 //******************************************************************************
 
 void Database::setStatementCacheLimit(std::size_t limit) {
+   UnitClaim claim(unitStatePtr(), "setStatementCacheLimit");
+   if (!claim.ok()) {
+      return;
+   }
+
    m_statementCacheLimit = limit;
 
    if (limit == 0) {
@@ -191,6 +201,11 @@ void Database::setStatementCacheLimit(std::size_t limit) {
 //******************************************************************************
 
 DBStatement* Database::cachedStatementForQuery(const std::string& query) {
+   UnitClaim claim(unitStatePtr(), "cachedStatementForQuery");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    return cachedStatementForQueryInternal(query);
 }
 
@@ -256,6 +271,11 @@ void Database::evictLeastRecentlyUsed(std::size_t keep) {
 //******************************************************************************
 
 void Database::clearCachedStatements() {
+   UnitClaim claim(unitStatePtr(), "clearCachedStatements");
+   if (!claim.ok()) {
+      return;
+   }
+
    clearCachedStatementsInternal();
 }
 

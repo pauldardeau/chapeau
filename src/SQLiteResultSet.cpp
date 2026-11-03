@@ -56,6 +56,11 @@ SQLiteResultSet::SQLiteResultSet(SQLiteStatement* statement,
 //******************************************************************************
 
 SQLiteResultSet::~SQLiteResultSet() {
+   // A destructor cannot refuse: a unit in use by another call is a misuse that
+   // ends the process with a diagnostic (see UnitClaim::abortUnlessOk).
+   UnitClaim claim(m_unit.get(), "~SQLiteResultSet", UnitClaim::Reporting::Probe);
+   claim.abortUnlessOk("~SQLiteResultSet");
+
    closeInternal();
    releaseStatement();
 
@@ -122,6 +127,11 @@ void SQLiteResultSet::finish(DBResultSetStatus finalStatus,
 //******************************************************************************
 
 void SQLiteResultSet::close() {
+   UnitClaim claim(m_unit.get(), "close");
+   if (!claim.ok()) {
+      return;
+   }
+
    closeInternal();
 }
 
@@ -200,6 +210,14 @@ void SQLiteResultSet::setupColumnNames() const {
 //******************************************************************************
 
 bool SQLiteResultSet::next() {
+   UnitClaim claim(m_unit.get(), "next");
+   if (!claim.ok()) {
+      return false;
+   }
+
+   // a step runs SQL functions, which may use the database again: see
+   // SQLiteDatabase::complainAboutNestedCall()
+   SQLiteDatabase::NestedRefusalScope nestedRefusals(m_parentDB);
    return advance("next()");
 }
 
@@ -252,6 +270,11 @@ bool SQLiteResultSet::advance(const char* operation) {
 // public method, without the method reaching it again through itself.
 
 int SQLiteResultSet::columnIndexForName(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "columnIndexForName");
+   if (!claim.ok()) {
+      return -1;
+   }
+
    return columnIndexForNameInternal(columnName);
 }
 
@@ -282,6 +305,11 @@ int SQLiteResultSet::columnIndexForNameInternal(const std::string& columnName) c
 //******************************************************************************
 
 int SQLiteResultSet::intForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "intForColumn");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -294,6 +322,11 @@ int SQLiteResultSet::intForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 int SQLiteResultSet::intForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "intForColumnIndex");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    return intForColumnIndexInternal(columnIdx);
 }
 
@@ -314,6 +347,11 @@ int SQLiteResultSet::intForColumnIndexInternal(int columnIdx) const {
 //******************************************************************************
 
 std::int64_t SQLiteResultSet::int64ForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "int64ForColumn");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -326,6 +364,11 @@ std::int64_t SQLiteResultSet::int64ForColumn(const std::string& columnName) cons
 //******************************************************************************
 
 std::int64_t SQLiteResultSet::int64ForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "int64ForColumnIndex");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    return int64ForColumnIndexInternal(columnIdx);
 }
 
@@ -344,6 +387,12 @@ std::int64_t SQLiteResultSet::int64ForColumnIndexInternal(int columnIdx) const {
 
 bool SQLiteResultSet::intForColumn(const std::string& columnName,
                                    int& value) const {
+   UnitClaim claim(m_unit.get(), "intForColumn");
+   if (!claim.ok()) {
+      value = 0;
+      return false;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -357,6 +406,12 @@ bool SQLiteResultSet::intForColumn(const std::string& columnName,
 //******************************************************************************
 
 bool SQLiteResultSet::intForColumnIndex(int columnIdx, int& value) const {
+   UnitClaim claim(m_unit.get(), "intForColumnIndex");
+   if (!claim.ok()) {
+      value = 0;
+      return false;
+   }
+
    return intForColumnIndexInternal(columnIdx, value);
 }
 
@@ -388,6 +443,11 @@ bool SQLiteResultSet::intForColumnIndexInternal(int columnIdx, int& value) const
 //******************************************************************************
 
 long SQLiteResultSet::longForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "longForColumn");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -400,6 +460,11 @@ long SQLiteResultSet::longForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 long SQLiteResultSet::longForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "longForColumnIndex");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    return longForColumnIndexInternal(columnIdx);
 }
 
@@ -417,6 +482,11 @@ long SQLiteResultSet::longForColumnIndexInternal(int columnIdx) const {
 //******************************************************************************
 
 bool SQLiteResultSet::boolForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "boolForColumn");
+   if (!claim.ok()) {
+      return false;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -429,12 +499,22 @@ bool SQLiteResultSet::boolForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 bool SQLiteResultSet::boolForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "boolForColumnIndex");
+   if (!claim.ok()) {
+      return false;
+   }
+
    return (int64ForColumnIndexInternal(columnIdx) != 0);
 }
 
 //******************************************************************************
 
 double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "doubleForColumn");
+   if (!claim.ok()) {
+      return 0.0;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -447,6 +527,11 @@ double SQLiteResultSet::doubleForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 double SQLiteResultSet::doubleForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "doubleForColumnIndex");
+   if (!claim.ok()) {
+      return 0.0;
+   }
+
    return doubleForColumnIndexInternal(columnIdx);
 }
 
@@ -464,6 +549,11 @@ double SQLiteResultSet::doubleForColumnIndexInternal(int columnIdx) const {
 //******************************************************************************
 
 std::string* SQLiteResultSet::stringForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "stringForColumnIndex");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    return stringForColumnIndexInternal(columnIdx);
 }
 
@@ -487,6 +577,11 @@ std::string* SQLiteResultSet::stringForColumnIndexInternal(int columnIdx) const 
 //******************************************************************************
 
 std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "stringForColumn");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -500,6 +595,12 @@ std::string* SQLiteResultSet::stringForColumn(const std::string& columnName) con
 
 bool SQLiteResultSet::stringForColumn(const std::string& columnName,
                                       std::string& columnValue) const {
+   UnitClaim claim(m_unit.get(), "stringForColumn");
+   if (!claim.ok()) {
+      columnValue.clear();
+      return false;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -514,6 +615,12 @@ bool SQLiteResultSet::stringForColumn(const std::string& columnName,
 
 bool SQLiteResultSet::stringForColumnIndex(int columnIdx,
                                            std::string& columnValue) const {
+   UnitClaim claim(m_unit.get(), "stringForColumnIndex");
+   if (!claim.ok()) {
+      columnValue.clear();
+      return false;
+   }
+
    return stringForColumnIndexInternal(columnIdx, columnValue);
 }
 
@@ -541,6 +648,11 @@ bool SQLiteResultSet::stringForColumnIndexInternal(int columnIdx,
 //******************************************************************************
 
 DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "dateForColumn");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -553,6 +665,11 @@ DBDate* SQLiteResultSet::dateForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 DBDate* SQLiteResultSet::dateForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "dateForColumnIndex");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    return dateForColumnIndexInternal(columnIdx);
 }
 
@@ -572,6 +689,11 @@ DBDate* SQLiteResultSet::dateForColumnIndexInternal(int columnIdx) const {
 //******************************************************************************
 
 DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
+   UnitClaim claim(m_unit.get(), "dataForColumn");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    const int columnIdx = columnIndexForNameInternal(columnName);
 
    if (columnIdx == -1) {
@@ -584,6 +706,11 @@ DBData* SQLiteResultSet::dataForColumn(const std::string& columnName) const {
 //******************************************************************************
 
 DBData* SQLiteResultSet::dataForColumnIndex(int columnIdx) const {
+   UnitClaim claim(m_unit.get(), "dataForColumnIndex");
+   if (!claim.ok()) {
+      return nullptr;
+   }
+
    return dataForColumnIndexInternal(columnIdx);
 }
 
@@ -641,6 +768,11 @@ void SQLiteResultSet::setStatement(SQLiteStatement* value) {
 //******************************************************************************
 
 int SQLiteResultSet::getColumnCount() const {
+   UnitClaim claim(m_unit.get(), "getColumnCount");
+   if (!claim.ok()) {
+      return 0;
+   }
+
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return 0;
@@ -652,6 +784,11 @@ int SQLiteResultSet::getColumnCount() const {
 //******************************************************************************
 
 DBValueType SQLiteResultSet::getTypeForColumnIndex(int columnIndex) const {
+   UnitClaim claim(m_unit.get(), "getTypeForColumnIndex");
+   if (!claim.ok()) {
+      return ValueTypeNull;
+   }
+
    sqlite3_stmt* const stmt = sqliteStatement();
    if (stmt == nullptr) {
       return ValueTypeNull;

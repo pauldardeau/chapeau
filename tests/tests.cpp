@@ -15,6 +15,7 @@
 #include "test_sqlite_result_set.h"
 #include "test_sqlite_statement.h"
 #include "test_unit_state.h"
+#include "test_unit_claims.h"
 
 
 namespace {
@@ -76,6 +77,10 @@ int Tests::run() {
    TestUnitState test_unit_state;
    test_unit_state.run();
    totals.add(test_unit_state);
+
+   TestUnitClaims test_unit_claims;
+   test_unit_claims.run();
+   totals.add(test_unit_claims);
 
    // self-registering POIVRE_TEST_CASE cases: there are none today, so the
    // registry is only run when something has registered. (Running an empty

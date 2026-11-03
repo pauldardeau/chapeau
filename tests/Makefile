@@ -24,6 +24,7 @@ test_sqlite_foundation.o \
 test_sqlite_result_set.o \
 test_sqlite_statement.o \
 test_unit_state.o \
+test_unit_claims.o \
 tests.o \
 $(POIVRE_OBJS)
 

@@ -10,11 +10,11 @@
  * refusal record, the aggregate counter, the logging helper and the non-reporting
  * probe.
  *
- * Nothing in the library takes the claim yet, so these tests use the primitive on
- * its own, on a UnitState of their own, never on a database operation, and never
- * run two threads inside a database at once. The simulated refusals are made
- * directly on the state (UnitState::recordRefusal / UnitClaim), not by a refused
- * database call, because no database call can be refused yet.
+ * These tests use the primitive on its own, on a UnitState of their own or on the
+ * state of a database that is idle, and never run two threads inside a database at
+ * once. The simulated refusals are made directly on the state (UnitState::
+ * recordRefusal / UnitClaim); refusals made by real calls are TestUnitClaims and the
+ * "refusal_*" scenarios of the regression harness (H1a-12g).
  *
  * Worker threads do not call require(): they record what they saw, and the main
  * thread checks it after joining them.
@@ -40,6 +40,16 @@ protected:
    void test_refusals_leave_the_error_snapshot_alone();
    void test_public_accessors_are_zero_in_ordinary_use();
    void test_public_accessors_report_refusals_when_there_are_some();
+   void test_claim_publishes_the_holder_after_it_takes_the_claim();
+   void test_claim_serializes_plain_data_under_contention();
+   void test_rapid_hand_off_between_two_threads();
+
+   // H1a-12g final hardening: the claim and the holder key under hand-offs
+   void test_holder_is_classified_in_every_state_of_a_claim();
+   void test_hand_off_interleavings_are_classified_correctly();
+   void test_thread_keys_are_distinct_and_stable();
+   void test_three_threads_hand_off_in_a_fixed_order();
+   void test_three_party_rotation_never_shows_a_stale_key();
 
 public:
    TestUnitState();

@@ -15,8 +15,14 @@
 //     the application provides (here: a mutex and condition variable, or a
 //     join).
 //
-// What is deliberately NOT here: any scenario in which two threads use one unit
-// at the same time. That is not supported, so it is not tested as if it were.
+// What is deliberately NOT here, among the scenarios above: any in which two
+// threads use one unit at the same time. That is not supported, so it is not
+// tested as if it were. The scenarios whose names begin "refusal_" and
+// "destructor_aborts_" (H1a-12g) are the exception that proves the rule: they
+// make a second thread call into a unit that is in use ON PURPOSE, to show that the
+// call is refused and touches nothing, and that a destructor which meets a unit in
+// use ends the process. The owner is held inside the unit by gate(), a SQL
+// function that signals "inside" and waits, so they are deterministic.
 // Under ThreadSanitizer these scenarios must run without a report; if one
 // does, either the test broke the contract or Chapeau has a defect in a
 // supported pattern, and the second is to be reported, not hidden.
@@ -34,6 +40,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,6 +62,9 @@
 #include "SQLiteResultSet.h"
 #include "DBStatementArgs.h"
 #include "DBLong.h"
+#include "DBData.h"
+#include "DBDate.h"
+#include "UnitState.h"
 
 using namespace chapeau;
 
@@ -398,6 +408,126 @@ bool threadSafeSqlite() {
       check("SQLite is built thread safe (sqlite3_threadsafe() is not 0); the threaded scenarios need it", false);
    }
    return ok;
+}
+
+// ---- refusals (H1a-12g) ---------------------------------------------------------------
+//
+// A call made on a unit while another call of that unit is running is REFUSED. These
+// scenarios make that happen on purpose, and deterministically: the owner thread runs
+// a call whose SQL contains gate(), a user function that says "I am inside" and then
+// waits until it is released, so the owner is provably inside the unit for as long as
+// the intruder needs. The intruder calls never touch SQLite: that is what is shown.
+// (They are the only code here that uses a unit from two threads at once, and only
+// to be refused; ThreadSanitizer must stay silent about them.)
+
+struct Gate {
+   Event inside;     // set by gate() when SQLite evaluates it, on the owner's thread
+   Event release;    // set by the test when the owner may go on
+};
+
+void gateFunction(sqlite3_context* context, int, sqlite3_value**) {
+   Gate* gate = static_cast<Gate*>(sqlite3_user_data(context));
+   gate->inside.set();
+   gate->release.wait();
+   sqlite3_result_int(context, 1);
+}
+
+bool installGate(SQLiteDatabase& db, Gate& gate) {
+   return sqlite3_create_function(db.sqliteHandle(), "gate", 0, SQLITE_UTF8, &gate,
+                                  gateFunction, nullptr, nullptr) == SQLITE_OK;
+}
+
+SQLiteResultSet* cursorOn(SQLiteDatabase& db, const std::string& sql) {
+   return dynamic_cast<SQLiteResultSet*>(db.executeQuery(sql));
+}
+
+// The calls of a cursor, 25 of them, each made on a cursor whose unit is in use by
+// another thread. Each must give its neutral value (and clear what it was given to
+// fill), and each is one refusal. Returns how many calls it made. Records into 'r'.
+long refusedCursorCalls(Report& r, SQLiteResultSet& rs, const std::string& who) {
+   long calls = 0;
+   int i = 42;
+   std::string s = "stale";
+   const DBResultSetStatus statusBefore = rs.status();
+
+   ++calls; r.expect(who + "next() is false", !rs.next());
+   ++calls; rs.close();
+   r.expect(who + "close() changed nothing: the status is what it was", rs.status() == statusBefore);
+   ++calls; r.expect(who + "getColumnCount() is 0", rs.getColumnCount() == 0);
+   ++calls; r.expect(who + "getTypeForColumnIndex() is null", rs.getTypeForColumnIndex(0) == ValueTypeNull);
+   ++calls; r.expect(who + "columnIndexForName() is -1", rs.columnIndexForName("id") == -1);
+   ++calls; r.expect(who + "intForColumn(name) is 0", rs.intForColumn("id") == 0);
+   ++calls; r.expect(who + "intForColumnIndex() is 0", rs.intForColumnIndex(0) == 0);
+   ++calls; r.expect(who + "int64ForColumn() is 0", rs.int64ForColumn("id") == 0);
+   ++calls; r.expect(who + "int64ForColumnIndex() is 0", rs.int64ForColumnIndex(0) == 0);
+   ++calls; r.expect(who + "intForColumn(name, out) is false and clears out", !rs.intForColumn("id", i) && i == 0);
+   i = 42;
+   ++calls; r.expect(who + "intForColumnIndex(i, out) is false and clears out", !rs.intForColumnIndex(0, i) && i == 0);
+   ++calls; r.expect(who + "longForColumn() is 0", rs.longForColumn("id") == 0);
+   ++calls; r.expect(who + "longForColumnIndex() is 0", rs.longForColumnIndex(0) == 0);
+   ++calls; r.expect(who + "boolForColumn() is false", !rs.boolForColumn("id"));
+   ++calls; r.expect(who + "boolForColumnIndex() is false", !rs.boolForColumnIndex(0));
+   ++calls; r.expect(who + "doubleForColumn() is 0", rs.doubleForColumn("id") == 0.0);
+   ++calls; r.expect(who + "doubleForColumnIndex() is 0", rs.doubleForColumnIndex(0) == 0.0);
+   ++calls; std::string* byName = rs.stringForColumn("v");
+   r.expect(who + "stringForColumn(name) is null", byName == nullptr);
+   delete byName;
+   ++calls; std::string* byIndex = rs.stringForColumnIndex(1);
+   r.expect(who + "stringForColumnIndex() is null", byIndex == nullptr);
+   delete byIndex;
+   ++calls; r.expect(who + "stringForColumn(name, out) is false and clears out", !rs.stringForColumn("v", s) && s.empty());
+   s = "stale";
+   ++calls; r.expect(who + "stringForColumnIndex(i, out) is false and clears out", !rs.stringForColumnIndex(1, s) && s.empty());
+   ++calls; DBDate* date = rs.dateForColumn("id");
+   r.expect(who + "dateForColumn() is null", date == nullptr);
+   delete date;
+   ++calls; date = rs.dateForColumnIndex(0);
+   r.expect(who + "dateForColumnIndex() is null", date == nullptr);
+   delete date;
+   ++calls; DBData* data = rs.dataForColumn("id");
+   r.expect(who + "dataForColumn() is null", data == nullptr);
+   delete data;
+   ++calls; data = rs.dataForColumnIndex(0);
+   r.expect(who + "dataForColumnIndex() is null", data == nullptr);
+   delete data;
+   return calls;
+}
+
+// the calling thread's refusal count since 'before'
+long long refusedSince(std::uint64_t before) {
+   return static_cast<long long>(Database::refusedCallsOnThisThread() - before);
+}
+
+// an in-memory unit with t(id, v) holding the rows 1..rows
+bool openFilled(SQLiteDatabase& db, int rows) {
+   db.setLogsErrors(false);
+   Report setup;
+   const bool opened = db.open();
+   check("the database opens", opened);
+   if (!opened) {
+      return false;
+   }
+   fillTable(db, setup, rows);
+   setup.print("setup: ");
+   return setup.allPassed();
+}
+
+// for the scenarios that end in an abort: the object the SQL function destroys
+void* g_victim = nullptr;
+bool g_victimIsDatabase = false;
+
+void destroyingFunction(sqlite3_context* context, int, sqlite3_value**) {
+   std::printf("EVIDENCE the SQL function destroys the %s from inside a call of its own unit\n",
+               g_victimIsDatabase ? "database" : "result set");
+   std::fflush(stdout);
+   if (g_victimIsDatabase) {
+      delete static_cast<SQLiteDatabase*>(g_victim);
+   } else {
+      delete static_cast<SQLiteResultSet*>(g_victim);
+   }
+   std::printf("NOT REACHED: the destructor returned\n");
+   std::fflush(stdout);
+   sqlite3_result_int(context, 1);
 }
 
 // ---- the scenarios ------------------------------------------------------------
@@ -1089,6 +1219,725 @@ std::map<std::string, Scenario> scenarios() {
          check(round + "order of use (" + occupancy.order() + ")", occupancy.order() == "ABC");
          check(round + "the file is intact (10 rows, writer rows kept)", idsInFile(path).size() == 10);
       }
+   };
+
+   // ===== refusals (H1a-12g) ===============================================================
+
+   // A refused next() is false, like the end of the data; what tells them apart is the
+   // cursor's status (not Done) and the thread's refusal count. The refused call
+   // consumes no row.
+   s["refusal_next_versus_end_of_data"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> rs(cursorOn(db, "select gate() as probe, id from t order by id"));
+      check("a cursor whose first step waits in the gate", rs != nullptr);
+      if (!rs) {
+         return;
+      }
+
+      Report owner, intruder;
+      std::vector<long long> ids;
+      Crew crew;
+      crew.start([&] {   // the owner: inside next() until it is released
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         while (rs->next()) {
+            ids.push_back(rs->longForColumnIndex(1));
+         }
+         owner.expect("owner: the cursor ended with Done", rs->status() == DBResultSetStatus::Done);
+         owner.expectLong("owner: it was refused nothing, the end of its data included", 0, refusedSince(before));
+      });
+      crew.start([&] {   // the intruder
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         const bool got = rs->next();
+         const DBResultSetStatus status = rs->status();
+         intruder.expect("intruder: next() returned false", !got);
+         intruder.expect("intruder: but the cursor is not finished (its status is not Done)", status != DBResultSetStatus::Done);
+         intruder.expectLong("intruder: its thread's refusal count rose by one", 1, refusedSince(before));
+         const RefusalRecord record = UnitState::threadRecord();
+         intruder.expect("intruder: the record names next()", record.operation != nullptr && std::string(record.operation) == "next");
+         gate.release.set();
+      });
+      crew.joinAll("next() versus the end of the data");
+      owner.print("");
+      intruder.print("");
+      check("the owner read every row, in order, none lost to the refused call", ids == std::vector<long long>({1, 2, 3}));
+      checkLong("refusals counted on the unit (the end of the data is not one)", 1, (long long) db.refusedCalls());
+   };
+
+   // Accessors of a cursor whose unit is in use by another thread give neutral values,
+   // clear what they were to fill, and leave the cursor as it is.
+   s["refusal_accessors_while_another_thread_advances"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> sibling(cursorOn(db, "select id, v from t order by id"));
+      std::unique_ptr<SQLiteResultSet> rs(cursorOn(db, "select gate() as probe, id from t order by id"));
+      check("two cursors", sibling != nullptr && rs != nullptr);
+      if (!sibling || !rs) {
+         return;
+      }
+      check("the sibling is on its first row", sibling->next() && sibling->longForColumnIndex(0) == 1);
+
+      Report owner, intruder;
+      long calls = 0;
+      Crew crew;
+      crew.start([&] {
+         owner.expect("owner: its next() goes through", rs->next());
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         calls += refusedCursorCalls(intruder, *rs, "stepped cursor: ");
+         calls += refusedCursorCalls(intruder, *sibling, "sibling: ");
+         intruder.expectLong("intruder: every call was a refusal on its thread", calls, refusedSince(before));
+         gate.release.set();
+      });
+      crew.joinAll("accessors while another thread advances");
+      owner.print("");
+      intruder.print("");
+      checkLong("the intruder made 50 calls", 50, calls);
+      checkLong("all of them are counted on the unit", calls, (long long) db.refusedCalls());
+      check("the stepped cursor is on its row and reads it", rs->status() == DBResultSetStatus::Row && rs->longForColumnIndex(1) == 1);
+      check("the sibling is still on its first row", sibling->status() == DBResultSetStatus::Row && sibling->longForColumnIndex(0) == 1);
+      check("and advances to the second, none skipped", sibling->next() && sibling->longForColumnIndex(0) == 2);
+      checkLong("the owner's thread was refused nothing; the unit's count did not move since", calls, (long long) db.refusedCalls());
+   };
+
+   // The owner's SQLite error is the database's snapshot, whatever is refused around it.
+   s["refusal_while_the_owner_records_an_error"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> sibling(cursorOn(db, "select id, v from t order by id"));
+      check("a sibling cursor", sibling != nullptr && sibling->next());
+      std::unique_ptr<SQLiteResultSet> failing(cursorOn(db, "select gate() as probe, abs(-9223372036854775807 - 1 - 0 * id) from t order by id"));
+      check("a cursor whose step fails after the gate", failing != nullptr);
+      if (!failing || !sibling) {
+         return;
+      }
+
+      Report owner, intruder;
+      long refused = 0;
+      Crew crew;
+      crew.start([&] {   // the owner's step fails (integer overflow) once it is released
+         owner.expect("owner: the step failed", !failing->next());
+         owner.expect("owner: the cursor is in Error", failing->status() == DBResultSetStatus::Error);
+         owner.expectLong("owner: with SQLite's code", SQLITE_ERROR, failing->lastErrorCode());
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         std::unique_ptr<DBResultSet> query(db.executeQuery("select 1"));          ++refused;
+         unsigned long rows = 7;
+         const bool updated = db.executeUpdate("update t set v = 'x'", rows);      ++refused;
+         refused += refusedCursorCalls(intruder, *sibling, "sibling: ");
+         intruder.expect("intruder: executeQuery() was refused", query == nullptr);
+         intruder.expect("intruder: executeUpdate() was refused, count cleared", !updated && rows == 0);
+         intruder.expect("intruder: no InUse was written for a call from another thread (the snapshot is the owner's: still clear)",
+                         db.lastErrorKind() == DBErrorKind::None && db.lastErrorCode() == 0 && db.lastErrorMessage().empty());
+         intruder.expectLong("intruder: all refused", refused, refusedSince(before));
+         gate.release.set();
+      });
+      crew.joinAll("refusals around an error");
+      owner.print("");
+      intruder.print("");
+      check("the snapshot is the failure of the owner's step", db.lastErrorKind() == DBErrorKind::Sqlite);
+      check("with SQLite's message", db.lastErrorMessage().find("integer overflow") != std::string::npos);
+      check("the cursor's own error is the same", failing->lastErrorMessage().find("integer overflow") != std::string::npos);
+      check("the sibling is untouched by the refusals", sibling->status() == DBResultSetStatus::Row && sibling->longForColumnIndex(0) == 1);
+      checkLong("the unit counted every refusal", refused, (long long) db.refusedCalls());
+   };
+
+   // The snapshot is the owner's: what an earlier failure left there stays through any number
+   // of refusals made by another thread, database calls and cursor calls alike.
+   s["refusal_leaves_the_error_snapshot_as_the_owner_left_it"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> sibling(cursorOn(db, "select id, v from t order by id"));
+      std::unique_ptr<SQLiteResultSet> rs(cursorOn(db, "select gate() as probe, id from t order by id"));
+      check("two cursors", sibling != nullptr && rs != nullptr);
+      if (!sibling || !rs) {
+         return;
+      }
+      check("a failed query leaves its error on the snapshot", db.executeQuery("select * from no_such_table") == nullptr &&
+                                                           db.lastErrorKind() == DBErrorKind::Sqlite);
+      const int code = db.lastErrorCode();
+      const std::string message = db.lastErrorMessage();
+
+      Report owner, intruder;
+      Crew crew;
+      crew.start([&] {   // stepping a cursor does not touch the snapshot
+         owner.expect("owner: its step goes through", rs->next());
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         auto unchanged = [&](const char* after) {
+            intruder.expect(std::string("intruder: the snapshot is as the owner left it, after ") + after,
+                            db.lastErrorKind() == DBErrorKind::Sqlite && db.lastErrorCode() == code && db.lastErrorMessage() == message);
+         };
+         std::unique_ptr<DBResultSet> query(db.executeQuery("select 1"));
+         unchanged("executeQuery()");
+         unsigned long rows = 0;
+         db.executeUpdate("update t set v = 'x'", rows);
+         unchanged("executeUpdate()");
+         db.beginTransaction();
+         db.commit();
+         db.open();
+         db.close();
+         unchanged("transaction calls, open() and close()");
+         refusedCursorCalls(intruder, *sibling, "sibling: ");
+         unchanged("25 cursor calls");
+         gate.release.set();
+      });
+      crew.joinAll("refusals and the snapshot");
+      owner.print("");
+      intruder.print("");
+      check("after the owner is done the snapshot is still that failure",
+            db.lastErrorKind() == DBErrorKind::Sqlite && db.lastErrorCode() == code && db.lastErrorMessage() == message);
+   };
+
+   // Two intruders at the same time: each thread keeps its own count and its own record,
+   // the unit adds them up.
+   s["refusal_two_simultaneous_intruders"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> sibling(cursorOn(db, "select id, v from t order by id"));
+      check("a sibling cursor", sibling != nullptr && sibling->next());
+      if (!sibling) {
+         return;
+      }
+      const int N = 300;
+      const std::uint64_t unitSerial = UnitStateAccess::of(db)->serial();
+
+      Report owner, a, b;
+      Rendezvous together(2);
+      std::atomic<int> finished(0);
+      auto leave = [&] {
+         if (finished.fetch_add(1) + 1 == 2) {
+            gate.release.set();
+         }
+      };
+
+      Crew crew;
+      crew.start([&] {   // the owner: an update that waits in the gate
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         unsigned long rows = 0;
+         owner.expect("owner: its update succeeds", db.executeUpdate("update t set v = 'owner' where id = gate()", rows) && rows == 1);
+         owner.expectLong("owner: it was refused nothing", 0, refusedSince(before));
+      });
+      crew.start([&] {   // intruder A: database calls
+         if (!gate.inside.wait() || !together.arriveAndWait()) {
+            a.expect("A: it got going", false);
+            leave();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         int refused = 0;
+         for (int i = 0; i < N; ++i) {
+            std::unique_ptr<DBResultSet> query(db.executeQuery("select 1"));
+            refused += (query == nullptr) ? 1 : 0;
+         }
+         a.expectLong("A: every query was refused", N, refused);
+         a.expectLong("A: its thread's count is its own calls", N, refusedSince(before));
+         const RefusalRecord record = UnitState::threadRecord();
+         a.expect("A: its record names its last operation", record.operation != nullptr && std::string(record.operation) == "executeQuery");
+         a.expectLong("A: and the unit", (long long) unitSerial, (long long) record.unitSerial);
+         leave();
+      });
+      crew.start([&] {   // intruder B: cursor calls
+         if (!gate.inside.wait() || !together.arriveAndWait()) {
+            b.expect("B: it got going", false);
+            leave();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         int refused = 0;
+         for (int i = 0; i < N; ++i) {
+            refused += (sibling->longForColumnIndex(0) == 0) ? 1 : 0;
+         }
+         b.expectLong("B: every read was refused", N, refused);
+         b.expectLong("B: its thread's count is its own calls", N, refusedSince(before));
+         const RefusalRecord record = UnitState::threadRecord();
+         b.expect("B: its record names its last operation", record.operation != nullptr && std::string(record.operation) == "longForColumnIndex");
+         b.expectLong("B: and the unit", (long long) unitSerial, (long long) record.unitSerial);
+         leave();
+      });
+      crew.joinAll("two intruders");
+      owner.print("");
+      a.print("");
+      b.print("");
+      checkLong("the unit's count is the sum of both threads'", 2 * N, (long long) db.refusedCalls());
+      check("the owner's update did its work", scalar(db, "select count(*) from t where v = 'owner'") == 1);
+   };
+
+   // Logging: the first refusal, then the powers of two; the patterns in CMake check the lines.
+   s["refusal_logging_thresholds"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      db.setLogsErrors(true);
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      std::unique_ptr<SQLiteResultSet> sibling(cursorOn(db, "select id, v from t order by id"));
+      check("a sibling cursor", sibling != nullptr && sibling->next());
+      if (!sibling) {
+         return;
+      }
+
+      Report owner, a, b;
+      std::atomic<int> finished(0);
+      auto leave = [&] {
+         if (finished.fetch_add(1) + 1 == 2) {
+            gate.release.set();
+         }
+      };
+      Crew crew;
+      crew.start([&] {
+         unsigned long rows = 0;
+         owner.expect("owner: its update succeeds", db.executeUpdate("update t set v = 'o' where id = gate()", rows));
+      });
+      crew.start([&] {   // five refusals
+         if (!gate.inside.wait()) {
+            a.expect("A: the owner got inside", false);
+            leave();
+            return;
+         }
+         for (int i = 0; i < 5; ++i) {
+            std::unique_ptr<DBResultSet> query(db.executeQuery("select 1"));
+            a.expect("A: refused", query == nullptr);
+         }
+         leave();
+      });
+      crew.start([&] {   // four refusals
+         if (!gate.inside.wait()) {
+            b.expect("B: the owner got inside", false);
+            leave();
+            return;
+         }
+         for (int i = 0; i < 4; ++i) {
+            b.expect("B: refused", sibling->longForColumnIndex(0) == 0);
+         }
+         leave();
+      });
+      crew.joinAll("nine refusals");
+      owner.print("");
+      a.print("");
+      b.print("");
+      checkLong("nine refusals counted", 9, (long long) db.refusedCalls());
+   };
+
+   // inUse() is a probe: busy is the answer, not a violation.
+   s["refusal_inuse_is_a_silent_probe"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      db.setLogsErrors(true);   // even with logging on, a probe says nothing
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      // The owner is inside a CURSOR STEP: unlike executeUpdate() and executeQuery() it does not set the
+      // in-use marker, so only the claim can tell the probe that the unit is busy.
+      std::unique_ptr<SQLiteResultSet> rs(cursorOn(db, "select gate() as probe, id from t order by id"));
+      check("a cursor whose step waits in the gate", rs != nullptr);
+      if (!rs) {
+         return;
+      }
+      check("idle: not in use", !db.inUse());
+
+      Report owner, intruder;
+      Crew crew;
+      crew.start([&] {
+         owner.expect("owner: its step goes through", rs->next());
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         int busy = 0;
+         for (int i = 0; i < 10; ++i) {
+            busy += db.inUse() ? 1 : 0;
+         }
+         intruder.expectLong("intruder: busy every time", 10, busy);
+         intruder.expectLong("intruder: nothing counted on its thread", 0, refusedSince(before));
+         intruder.expect("intruder: nothing written to the snapshot", db.lastErrorKind() == DBErrorKind::None);
+         gate.release.set();
+      });
+      crew.joinAll("the probe");
+      owner.print("");
+      intruder.print("");
+      checkLong("nothing counted on the unit", 0, (long long) db.refusedCalls());
+      check("idle again: not in use", !db.inUse());
+   };
+
+   // Different connections do not refuse each other.
+   s["refusal_independent_connections_do_not_refuse_each_other"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase first(":memory:");
+      SQLiteDatabase second(":memory:");
+      if (!openFilled(first, 3) || !openFilled(second, 3)) {
+         return;
+      }
+      Gate gate;
+      check("the gate function is installed", installGate(first, gate));
+      check("two units with two serials", UnitStateAccess::of(first)->serial() != UnitStateAccess::of(second)->serial());
+
+      Report owner, worker;
+      Crew crew;
+      crew.start([&] {   // the first unit is busy for as long as the second is worked
+         unsigned long rows = 0;
+         owner.expect("owner: its update succeeds", first.executeUpdate("update t set v = 'o' where id = gate()", rows));
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            worker.expect("worker: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         for (int i = 0; i < 20; ++i) {
+            worker.expect("worker: an insert on the second unit", exec(second, "insert into t(id, v) values (" + std::to_string(100 + i) + ", 'w')"));
+            worker.expect("worker: a query on the second unit", scalar(second, "select count(*) from t") == 4 + i);
+         }
+         worker.expect("worker: a transaction on the second unit", second.beginTransaction() && second.commit());
+         worker.expectLong("worker: nothing refused to it", 0, refusedSince(before));
+         unsigned long rows = 0;
+         worker.expect("worker: the first unit does refuse it", !first.executeUpdate("update t set v = 'w'", rows));
+         worker.expectLong("worker: that was one refusal", 1, refusedSince(before));
+         gate.release.set();
+      });
+      crew.joinAll("independent connections");
+      owner.print("");
+      worker.print("");
+      checkLong("the second unit refused nothing", 0, (long long) second.refusedCalls());
+      checkLong("the first unit refused the one call", 1, (long long) first.refusedCalls());
+   };
+
+   // The supported hand-off of a live cursor is never refused.
+   s["refusal_handoff_of_a_live_cursor_is_never_refused"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      Unit unit;
+      unit.db.reset(new SQLiteDatabase(":memory:"));
+      if (!openFilled(*unit.db, 100)) {
+         return;
+      }
+      unit.cursors.emplace_back(unit.db->executeQuery("select id from t order by id"));
+      check("a live cursor", unit.cursors[0] != nullptr);
+      const std::shared_ptr<UnitState> state = UnitStateAccess::of(*unit.db);
+
+      const int ROUNDS = 20;
+      Baton toA, toB, toMain;
+      Report a, b;
+      std::vector<long long> ids;
+      Crew crew;
+      auto use = [&](Unit& u, Report& r, const char* who) {
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         r.expect(std::string(who) + ": the cursor advances", u.cursors[0]->next());
+         ids.push_back(u.cursors[0]->longForColumnIndex(0));
+         r.expect(std::string(who) + ": the database answers at once, right after the hand-off", scalar(*u.db, "select count(*) from t") == 100);
+         unsigned long rows = 0;
+         r.expect(std::string(who) + ": and updates", u.db->executeUpdate("update t set v = 'h' where id = 1", rows));
+         r.expectLong(std::string(who) + ": nothing was refused", 0, refusedSince(before));
+      };
+      crew.start([&] {
+         for (int round = 0; round < ROUNDS; ++round) {
+            Unit u;
+            if (!toA.take(u)) {
+               a.expect("A: the unit arrived", false);
+               return;
+            }
+            use(u, a, "A");
+            toB.give(std::move(u));
+         }
+      });
+      crew.start([&] {
+         for (int round = 0; round < ROUNDS; ++round) {
+            Unit u;
+            if (!toB.take(u)) {
+               b.expect("B: the unit arrived", false);
+               return;
+            }
+            use(u, b, "B");
+            if (round + 1 < ROUNDS) {
+               toA.give(std::move(u));
+            } else {
+               toMain.give(std::move(u));
+            }
+         }
+      });
+      toA.give(std::move(unit));
+      Unit back;
+      check("the unit came back", toMain.take(back));
+      crew.joinAll("forty hand-offs");
+      a.print("");
+      b.print("");
+      check("the cursor delivered 1..40 in order across the threads", ids.size() == 40 && ids.front() == 1 && ids.back() == 40);
+      checkLong("the unit refused nothing", 0, (long long) state->refusedCalls());
+      back.cursors.clear();
+      back.db.reset();
+   };
+
+   // Refused calls neither release nor invalidate what the owner is using.
+   s["refusal_leaves_the_owner_statement_alone"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      db.setStatementCacheLimit(5);
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      const std::string sql = "select gate() as probe, id from t order by id";
+      std::unique_ptr<SQLiteResultSet> rs(cursorOn(db, sql));
+      check("a cursor on a cached statement", rs != nullptr && db.cachedStatementForQuery(sql) != nullptr);
+      if (!rs) {
+         return;
+      }
+
+      Report owner, intruder;
+      std::vector<long long> ids;
+      Crew crew;
+      crew.start([&] {
+         while (rs->next()) {
+            ids.push_back(rs->longForColumnIndex(1));
+         }
+         owner.expect("owner: it ran to the end", rs->status() == DBResultSetStatus::Done);
+      });
+      crew.start([&] {
+         if (!gate.inside.wait()) {
+            intruder.expect("intruder: the owner got inside", false);
+            gate.release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         rs->close();
+         db.close();
+         db.clearCachedStatements();
+         db.setStatementCacheLimit(0);
+         db.setShouldCacheStatements(false);
+         intruder.expect("intruder: open() is refused", !db.open());
+         intruder.expect("intruder: goodConnection() is refused", !db.goodConnection());
+         intruder.expect("intruder: beginTransaction() is refused", !db.beginTransaction());
+         intruder.expect("intruder: cachedStatementForQuery() is refused", db.cachedStatementForQuery(sql) == nullptr);
+         intruder.expectLong("intruder: nine refusals", 9, refusedSince(before));
+         gate.release.set();
+      });
+      crew.joinAll("refusals around a statement");
+      owner.print("");
+      intruder.print("");
+      check("the owner read every row: nothing was closed under it", ids == std::vector<long long>({1, 2, 3}));
+      check("the connection is open", db.sqliteHandle() != nullptr);
+      check("caching is on and the limit is as it was", db.shouldCacheStatements() && db.statementCacheLimit() == 5);
+      check("the statement is still cached", db.cachedStatementForQuery(sql) != nullptr);
+      check("and no transaction was started", !db.inTransaction());
+      rs.reset();
+      check("the same SQL runs again from the cache", scalar(db, "select count(*) from t") == 3);
+   };
+
+   // A cursor that outlives its database still refuses without touching the database.
+   s["refusal_cursor_outlives_database_across_threads"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      std::unique_ptr<SQLiteResultSet> cursor;
+      std::shared_ptr<UnitState> state;
+      {
+         SQLiteDatabase db(":memory:");
+         if (!openFilled(db, 3)) {
+            return;
+         }
+         cursor.reset(cursorOn(db, "select id, v from t order by id"));
+         check("a live cursor", cursor != nullptr && cursor->next());
+         if (!cursor) {
+            return;
+         }
+         state = UnitStateAccess::of(*cursor);
+      }   // the database is destroyed here, idle
+      check("the cursor knows its database went away", cursor->status() == DBResultSetStatus::Invalidated);
+
+      Event held, release;
+      Report holder, intruder;
+      long calls = 0;
+      Crew crew;
+      crew.start([&] {   // stands in for a call that is running on the unit
+         UnitClaim claim(state.get(), "stand-in");
+         holder.expect("holder: it has the claim", claim.ok());
+         held.set();
+         release.wait();
+      });
+      crew.start([&] {
+         if (!held.wait()) {
+            intruder.expect("intruder: the holder got the claim", false);
+            release.set();
+            return;
+         }
+         const std::uint64_t before = Database::refusedCallsOnThisThread();
+         calls = refusedCursorCalls(intruder, *cursor, "cursor: ");
+         intruder.expectLong("intruder: every call a refusal", calls, refusedSince(before));
+         intruder.expect("intruder: and the cursor is as the database's end left it", cursor->status() == DBResultSetStatus::Invalidated);
+         release.set();
+      });
+      crew.joinAll("a cursor after its database");
+      holder.print("");
+      intruder.print("");
+      checkLong("the unit counted them, through the cursor's own reference", calls, (long long) state->refusedCalls());
+      check("afterwards the cursor is used as before", !cursor->next() && cursor->status() == DBResultSetStatus::Invalidated);
+      checkLong("and refuses nothing", calls, (long long) state->refusedCalls());
+      cursor.reset();
+   };
+
+   // ---- destructors of a unit in use end the process (the harness expects the abort) ----
+
+   s["destructor_aborts_when_the_database_is_in_use_by_another_thread"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase* db = new SQLiteDatabase(":memory:");
+      if (!openFilled(*db, 3)) {
+         return;
+      }
+      db->setLogsErrors(true);   // a destructor aborts; it does not also report a refusal
+      Gate gate;
+      check("the gate function is installed", installGate(*db, gate));
+      SQLiteResultSet* rs = cursorOn(*db, "select gate() as probe, id from t order by id");
+      check("a cursor", rs != nullptr);
+      Crew crew;
+      crew.start([&] { rs->next(); });   // inside the unit until the gate is released
+      check("the owner is inside", gate.inside.wait());
+      evidence("destroying the database from another thread while the unit is in use");
+      delete db;   // must abort the process
+      std::printf("NOT REACHED: the destructor returned\n");
+      gate.release.set();
+      std::_Exit(1);
+   };
+
+   s["destructor_aborts_when_a_cursor_is_destroyed_while_the_unit_is_in_use"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      db.setLogsErrors(true);   // a destructor aborts; it does not also report a refusal
+      Gate gate;
+      check("the gate function is installed", installGate(db, gate));
+      SQLiteResultSet* sibling = cursorOn(db, "select id, v from t order by id");
+      SQLiteResultSet* rs = cursorOn(db, "select gate() as probe, id from t order by id");
+      check("two cursors", sibling != nullptr && rs != nullptr);
+      Crew crew;
+      crew.start([&] { rs->next(); });
+      check("the owner is inside", gate.inside.wait());
+      evidence("destroying a cursor from another thread while the unit is in use");
+      delete sibling;   // must abort the process
+      std::printf("NOT REACHED: the destructor returned\n");
+      gate.release.set();
+      std::_Exit(1);
+   };
+
+   s["destructor_aborts_when_the_database_is_destroyed_from_inside_its_own_call"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase* db = new SQLiteDatabase(":memory:");
+      if (!openFilled(*db, 3)) {
+         return;
+      }
+      db->setLogsErrors(true);   // a destructor aborts; it does not also report a refusal
+      g_victim = db;
+      g_victimIsDatabase = true;
+      check("the destroying function is installed",
+            sqlite3_create_function(db->sqliteHandle(), "destroy_it", 0, SQLITE_UTF8, nullptr, destroyingFunction, nullptr, nullptr) == SQLITE_OK);
+      unsigned long rows = 0;
+      db->executeUpdate("update t set v = destroy_it() where id = 1", rows);   // the function deletes db: must abort
+      std::printf("NOT REACHED: the update returned\n");
+      std::_Exit(1);
+   };
+
+   s["destructor_aborts_when_a_cursor_is_destroyed_from_inside_its_own_step"] = [] {
+      if (!threadSafeSqlite()) {
+         return;
+      }
+      SQLiteDatabase db(":memory:");
+      if (!openFilled(db, 3)) {
+         return;
+      }
+      db.setLogsErrors(true);   // a destructor aborts; it does not also report a refusal
+      check("the destroying function is installed",
+            sqlite3_create_function(db.sqliteHandle(), "destroy_it", 0, SQLITE_UTF8, nullptr, destroyingFunction, nullptr, nullptr) == SQLITE_OK);
+      SQLiteResultSet* sibling = cursorOn(db, "select id, v from t order by id");
+      SQLiteResultSet* rs = cursorOn(db, "select destroy_it() as probe, id from t order by id");
+      g_victim = sibling;
+      g_victimIsDatabase = false;
+      check("two cursors", sibling != nullptr && rs != nullptr);
+      rs->next();   // the function deletes the sibling: must abort
+      std::printf("NOT REACHED: the step returned\n");
+      std::_Exit(1);
    };
 
    return s;

@@ -17,9 +17,18 @@ classifies the result (`Classify.cmake`), in this order:
 | `success`     | exit status 0                                                        |
 | `exit:<n>`    | exit status `n`                                                      |
 
-A case states what it expects: `success` (the default) or `exit:<n>`. It
-passes only if the outcome equals that. There is no way to expect a crash, a
-hang or a sanitizer report, so none of them can pass as "expected". A hung child
+A case states what it expects: `success` (the default), `exit:<n>` or, in one
+narrow case, `abort`. It passes only if the outcome equals that. There is no way
+to expect a crash, a hang or a sanitizer report, so none of them can pass as
+"expected".
+
+`abort` exists because Chapeau's destructors end the process on purpose when
+they meet a unit that is in use. A case with `EXPECT abort` must also give an
+`ABORT_DIAGNOSTIC` (a regular expression), and passes only if the child was ended
+by SIGABRT, the output holds the diagnostic, and the output holds no sanitizer
+report (a report outranks the abort: the outcome is then `sanitizer`). Any other
+crash, a different signal, an exit status, a hang, or an abort that did not say
+why, fails the case. `harness_selfcheck` proves each of those refusals. A hung child
 is killed after `TIMEOUT` seconds (default 60) and reported as `timeout`; it
 cannot block the run. Each execution gets its own temporary directory (via
 `TMPDIR`/`TMP`/`TEMP`), which is removed afterwards; a child that ended normally
@@ -81,6 +90,24 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   join, and every wait has a limit that ends the process with a failed check.
   The waits use the system clock on purpose (see `waitFor()` in the probe): the
   ThreadSanitizer of GCC 11 mis-reports `condition_variable::wait_for()`.
+
+* **Refusal scenarios** (`refusal_*` and `destructor_aborts_*` in
+  `chapeau_concurrency_probe.cpp`, H1a-12g; labels `regression`, `concurrency`
+  and `refusal`): a call made while another call of the same unit is running is
+  refused, and a destructor that meets a unit in use ends the process. The owner
+  is held inside the unit by a SQL function (`gate()`) that signals and waits
+  for a release, so each case is deterministic: no sleeps, every wait bounded.
+  The intruder threads call into the unit on purpose, and are refused; they must
+  not race (they touch only atomics and their own thread-local record), so
+  ThreadSanitizer stays silent. The cases: a refused `next()` against the end of
+  the data; every cursor accessor refused (neutral values, out parameters cleared);
+  a refusal while the owner records a SQLite error; two intruders at once
+  (per-thread counts and records, the unit's sum); the log thresholds; `inUse()` as
+  a silent probe; independent connections; a hand-off of a live cursor that is never
+  refused; a refusal that leaves the owner's cached statement alone; a cursor that
+  outlives its database; and four destructors that must abort (another thread, or
+  the same thread from inside its own call; database and cursor), checked with
+  `EXPECT abort`.
 
 * **SQLite threading-mode programs** (`threadsafe0_probe.cpp`,
   `threadsafe2_probe.cpp`, H1a-12b; labels `regression` and `sqlite-threading`;

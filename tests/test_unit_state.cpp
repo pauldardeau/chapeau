@@ -115,6 +115,14 @@ void TestUnitState::runTests() {
    test_refusals_leave_the_error_snapshot_alone();
    test_public_accessors_are_zero_in_ordinary_use();
    test_public_accessors_report_refusals_when_there_are_some();
+   test_claim_publishes_the_holder_after_it_takes_the_claim();
+   test_claim_serializes_plain_data_under_contention();
+   test_rapid_hand_off_between_two_threads();
+   test_holder_is_classified_in_every_state_of_a_claim();
+   test_hand_off_interleavings_are_classified_correctly();
+   test_thread_keys_are_distinct_and_stable();
+   test_three_threads_hand_off_in_a_fixed_order();
+   test_three_party_rotation_never_shows_a_stale_key();
 }
 
 void TestUnitState::test_database_and_cursors_share_one_unit_state() {
@@ -847,4 +855,483 @@ void TestUnitState::test_public_accessors_report_refusals_when_there_are_some() 
    requireStringEquals("1", to_string(otherThread), "that thread's count: 1");
    requireStringEquals("4", to_string(db.refusedCalls()), "the database's count: 4");
    requireStringEquals("3", to_string(Database::refusedCallsOnThisThread() - threadBefore), "this thread's count: still 3");
+}
+
+// ---- H1a-12g: the claim and the holder key (see the memory-order notes in UnitState.h) ------------------------
+
+void TestUnitState::test_claim_publishes_the_holder_after_it_takes_the_claim() {
+   TEST_CASE("test_claim_publishes_the_holder_after_it_takes_the_claim");
+   UnitState unit;
+   const uintptr_t me = UnitState::currentThreadKey();
+
+   // The window between "the claim is taken" and "the holder is stored" is the state
+   // claimed-with-holder-0: tryClaim(0) leaves exactly that behind. In it nobody is
+   // 'the holder': not this thread, not another, and 0 is not a key.
+   require(unit.tryClaim(0), "the claim is taken with no holder published yet");
+   require(unit.isClaimed(), "it is claimed");
+   require(!unit.heldBy(me), "this thread is not mistaken for the holder in the window");
+   require(!unit.heldBy(0), "and 0 is never a holder");
+   {
+      UnitClaim during(&unit, "during", UnitClaim::Reporting::Probe);
+      require(!during.ok() && !during.reentrant(), "a refusal in the window is an overlap, never re-entrance");
+   }
+   unit.release();
+   require(!unit.isClaimed() && !unit.heldBy(me), "released: free, and nobody holds it");
+
+   // the holder is published, then withdrawn, and never outlives the claim
+   {
+      UnitClaim claim(&unit, "claim");
+      require(claim.ok() && unit.heldBy(me), "taken: this thread holds it");
+      UnitClaim nested(&unit, "nested", UnitClaim::Reporting::Probe);
+      require(!nested.ok() && nested.reentrant(), "a nested claim by the holder is re-entrance");
+   }
+   require(!unit.heldBy(me), "after the claim ends this thread is no longer the holder");
+
+   // release and immediate reacquisition, many times, on one thread
+   bool allGranted = true;
+   for (int i = 0; i < 20000; ++i) {
+      UnitClaim again(&unit, "again", UnitClaim::Reporting::Probe);
+      allGranted = allGranted && again.ok() && unit.heldBy(me);
+   }
+   require(allGranted, "release followed at once by a new claim is always granted, 20000 times");
+   require(!unit.isClaimed(), "and the last release left it free");
+
+   // another thread's stale key is not ours: A holds and releases, B holds, A is refused as overlap
+   atomic<int> step(0);
+   atomic<bool> classifiedAsOverlap(false);
+   thread a([&] {
+      { UnitClaim first(&unit, "a1", UnitClaim::Reporting::Probe); }
+      step.store(1);
+      while (step.load() != 2) { this_thread::yield(); }
+      UnitClaim second(&unit, "a2", UnitClaim::Reporting::Probe);
+      classifiedAsOverlap.store(!second.ok() && !second.reentrant());
+      step.store(3);
+   });
+   thread b([&] {
+      while (step.load() != 1) { this_thread::yield(); }
+      UnitClaim mine(&unit, "b", UnitClaim::Reporting::Probe);
+      step.store(2);
+      while (step.load() != 3) { this_thread::yield(); }
+   });
+   a.join();
+   b.join();
+   require(classifiedAsOverlap.load(), "a thread that held and released is refused as an overlap, not re-entrance, while another holds");
+}
+
+void TestUnitState::test_claim_serializes_plain_data_under_contention() {
+   TEST_CASE("test_claim_serializes_plain_data_under_contention");
+   // Four threads fight for one claim. The data the claim protects is a PLAIN int and a
+   // plain long: no atomic, no lock. If the claim does not give mutual exclusion, or does
+   // not hand the writes of one owner to the next (the acquire/release pairing), the
+   // counts are wrong and, under ThreadSanitizer, the plain accesses are reported as races.
+   UnitState unit;
+   int inside = 0;
+   long total = 0;
+   const int THREADS = 4;
+   const int ROUNDS = 20000;
+   atomic<long> overlapsSeen(0);
+   atomic<long> wrongClassification(0);
+   atomic<long> granted(0);
+
+   vector<thread> crew;
+   for (int t = 0; t < THREADS; ++t) {
+      crew.emplace_back([&] {
+         const uintptr_t me = UnitState::currentThreadKey();
+         for (int i = 0; i < ROUNDS; ++i) {
+            UnitClaim claim(&unit, "contend", UnitClaim::Reporting::Probe);
+            if (claim.ok()) {
+               // The plain data first, before any other atomic operation of this thread: until
+               // the checks below, the claim's own compare-exchange is all that orders this
+               // thread's accesses after the previous owner's (an acquire load of the claim
+               // word, such as heldBy() does, or an atomic increment that the previous owner
+               // also made, would order them too and hide a compare-exchange without acquire).
+               const int insideNow = ++inside;
+               ++total;
+               // inside the claim, a nested claim is re-entrance, never an overlap
+               UnitClaim nested(&unit, "nested", UnitClaim::Reporting::Probe);
+               const bool nestedRight = !nested.ok() && nested.reentrant();
+               --inside;
+               granted.fetch_add(1);
+               if (insideNow != 1) {
+                  overlapsSeen.fetch_add(1);
+               }
+               if (!nestedRight || !unit.heldBy(me)) {
+                  wrongClassification.fetch_add(1);
+               }
+            } else if (claim.reentrant()) {
+               // refused while somebody else holds it: that is never re-entrance
+               wrongClassification.fetch_add(1);
+            }
+         }
+      });
+   }
+   for (thread& worker : crew) {
+      worker.join();
+   }
+
+   requireStringEquals(to_string(0), to_string(overlapsSeen.load()), "two threads were never inside together");
+   requireStringEquals(to_string(0), to_string(wrongClassification.load()), "re-entrance and overlap were never confused");
+   requireStringEquals(to_string(granted.load()), to_string(total), "every grant was one increment of the plain counter: the owners' writes reached the next owner");
+   require(granted.load() > 0, "some claims were granted (" + to_string(granted.load()) + " of " + to_string(THREADS * ROUNDS) + ")");
+   require(!unit.isClaimed(), "and the claim is free at the end");
+}
+
+void TestUnitState::test_rapid_hand_off_between_two_threads() {
+   TEST_CASE("test_rapid_hand_off_between_two_threads");
+   // Two threads take the claim in turn, as fast as they can, passing the turn through an
+   // atomic. Nothing is ever refused (the previous owner has released before it passes the
+   // turn) and a plain counter written under the claim arrives intact at the other thread.
+   UnitState unit;
+   long shared = 0;
+   atomic<int> turn(0);
+   atomic<long> refused(0);
+   const int ROUNDS = 20000;
+
+   auto player = [&](int me) {
+      for (int i = 0; i < ROUNDS; ++i) {
+         const auto deadline = chrono::steady_clock::now() + chrono::seconds(20);
+         while (turn.load(memory_order_acquire) != me) {
+            if (chrono::steady_clock::now() > deadline) {
+               refused.fetch_add(1000000);
+               return;
+            }
+            this_thread::yield();
+         }
+         {
+            UnitClaim claim(&unit, "hand-off", UnitClaim::Reporting::Probe);
+            if (!claim.ok()) {
+               refused.fetch_add(1);
+            } else {
+               ++shared;
+            }
+         }
+         turn.store(1 - me, memory_order_release);
+      }
+   };
+   thread first(player, 0);
+   thread second(player, 1);
+   first.join();
+   second.join();
+
+   requireStringEquals(to_string(0), to_string(refused.load()), "no claim made right after a hand-off was refused");
+   requireStringEquals(to_string(2L * ROUNDS), to_string(shared), "every owner saw the previous owner's write");
+}
+
+// ---- H1a-12g final hardening: the claim and the holder key under hand-offs ------------------------
+//
+// The argument is in UnitState.h ("Why two atomics are enough"). These tests check its
+// consequences. The first two use made-up keys on ONE thread, so every state of the pair
+// (claimed, holder) and every order of acquisitions and releases is visited deterministically,
+// whatever the hardware; the third scripts real threads step by step (every step is ordered
+// by a sequentially consistent atomic, so the order is fixed, not hoped for); the fourth is
+// the stress run, which is supplementary evidence and not the proof.
+
+namespace {
+
+const uintptr_t KEY_A = 0x1000;
+const uintptr_t KEY_B = 0x2000;
+const uintptr_t KEY_C = 0x3000;
+
+// who the unit says it is held by, as seen by the three keys: "A", "B", "C", their combinations, or "-"
+string believers(const UnitState& unit) {
+   string who;
+   if (unit.heldBy(KEY_A)) { who += "A"; }
+   if (unit.heldBy(KEY_B)) { who += "B"; }
+   if (unit.heldBy(KEY_C)) { who += "C"; }
+   return who.empty() ? string("-") : who;
+}
+
+}
+
+void TestUnitState::test_holder_is_classified_in_every_state_of_a_claim() {
+   TEST_CASE("test_holder_is_classified_in_every_state_of_a_claim");
+   // The pair (claimed, holder) has three states that a claim goes through:
+   //    free (0, 0)   --tryClaim(0)-->   claimed, holder not yet published (1, 0)   --> (1, K)
+   //    and back, through (1, 0) again, because release() clears the holder first.
+   // (1, 0) is also the state of a release that is half way. In each state, for each key,
+   // heldBy() must say 'yes' only for the key that is the holder.
+   UnitState unit;
+   requireStringEquals("-", believers(unit), "free: nobody");
+   require(!unit.isClaimed(), "free: not claimed");
+
+   // claimed, holder not published (the window after the compare-exchange; a release half way)
+   require(unit.tryClaim(0), "the claim is taken with the holder not published yet");
+   requireStringEquals("-", believers(unit), "claimed with no holder: nobody is the holder, and every key is an overlap");
+   require(unit.isClaimed(), "it is claimed");
+   require(!unit.tryClaim(KEY_A) && !unit.tryClaim(KEY_B) && !unit.tryClaim(KEY_C), "and nobody else gets it");
+   requireStringEquals("-", believers(unit), "refusals in that state change nothing");
+   unit.release();
+   requireStringEquals("-", believers(unit), "released");
+
+   // claimed by each key in turn
+   const uintptr_t keys[3] = { KEY_A, KEY_B, KEY_C };
+   const char* const names[3] = { "A", "B", "C" };
+   for (int holder = 0; holder < 3; ++holder) {
+      require(unit.tryClaim(keys[holder]), string("taken by ") + names[holder]);
+      requireStringEquals(names[holder], believers(unit), string("held by ") + names[holder] + ": exactly that key is the holder");
+      for (int other = 0; other < 3; ++other) {
+         if (other != holder) {
+            require(!unit.tryClaim(keys[other]), string(names[other]) + " is refused");
+            requireStringEquals(names[holder], believers(unit),
+                                string("and its refusal did not publish ") + names[other] + " as the holder, nor remove " + names[holder]);
+         }
+      }
+      require(!unit.tryClaim(keys[holder]), string("the holder ") + names[holder] + " cannot take it twice");
+      requireStringEquals(names[holder], believers(unit), "and is still the holder");
+      unit.release();
+      requireStringEquals("-", believers(unit), string("released by ") + names[holder] + ": nobody, in particular not " + names[holder]);
+   }
+
+   // heldBy(0) is never true, in any state
+   require(!unit.heldBy(0), "0 is never a holder (free)");
+   unit.tryClaim(0);
+   require(!unit.heldBy(0), "0 is never a holder (claimed, holder 0)");
+   unit.release();
+}
+
+void TestUnitState::test_hand_off_interleavings_are_classified_correctly() {
+   TEST_CASE("test_hand_off_interleavings_are_classified_correctly");
+   UnitState unit;
+
+   // 1. A releases; B immediately acquires
+   require(unit.tryClaim(KEY_A), "1: A holds");
+   unit.release();
+   require(unit.tryClaim(KEY_B), "1: B acquires at once");
+   requireStringEquals("B", believers(unit), "1: B is the holder and A, which held it a moment ago, is not");
+   unit.release();
+
+   // 2. A releases; A immediately reacquires
+   require(unit.tryClaim(KEY_A), "2: A holds");
+   unit.release();
+   require(unit.tryClaim(KEY_A), "2: A reacquires at once");
+   requireStringEquals("A", believers(unit), "2: A is the holder");
+   require(!unit.tryClaim(KEY_B), "2: B is refused");
+   requireStringEquals("A", believers(unit), "2: and still A holds it");
+   unit.release();
+
+   // 3. A releases; B acquires; A attempts a claim: A is refused, and is NOT told it is the holder
+   require(unit.tryClaim(KEY_A), "3: A holds");
+   unit.release();
+   require(unit.tryClaim(KEY_B), "3: B acquires");
+   require(!unit.tryClaim(KEY_A), "3: A is refused");
+   require(!unit.heldBy(KEY_A), "3: A, which held it before, does not see its own old key as the holder");
+   require(unit.heldBy(KEY_B), "3: B is the holder");
+   unit.release();
+
+   // 4. A releases; B acquires; C attempts a claim
+   require(unit.tryClaim(KEY_A), "4: A holds");
+   unit.release();
+   require(unit.tryClaim(KEY_B), "4: B acquires");
+   require(!unit.tryClaim(KEY_C), "4: C is refused");
+   require(!unit.heldBy(KEY_C) && !unit.heldBy(KEY_A), "4: neither C nor A is the holder");
+   require(unit.heldBy(KEY_B), "4: B is");
+   unit.release();
+
+   // 5 and 6. A competing thread observes the claimed word before the holder is published, and
+   // the holder while a release is under way: both are the state (claimed, holder 0) or
+   // (claimed, holder K), and the previous test visited each of them for every key.
+   require(unit.tryClaim(KEY_A), "5: A holds");
+   unit.release();
+   require(unit.tryClaim(0), "5: B has the claim word but has not published its key");
+   require(!unit.tryClaim(KEY_A) && !unit.heldBy(KEY_A), "5: A (which held it earlier) is refused and is not 'the holder'");
+   unit.release();
+
+   // 7. Rapid repeated hand-offs among three: at every step exactly the new holder believes it
+   // is the holder; the one that just released, and the third, do not; and the one that
+   // just released is refused, as an overlap
+   const uintptr_t keys[3] = { KEY_A, KEY_B, KEY_C };
+   long wrong = 0;
+   long handOffs = 0;
+   int previous = -1;
+   for (int round = 0; round < 30000; ++round) {
+      const int holder = round % 3;
+      if (!unit.tryClaim(keys[holder])) { ++wrong; continue; }
+      ++handOffs;
+      for (int other = 0; other < 3; ++other) {
+         const bool believes = unit.heldBy(keys[other]);
+         if (believes != (other == holder)) { ++wrong; }
+         if (other != holder && unit.tryClaim(keys[other])) { ++wrong; unit.release(); }
+      }
+      if (previous >= 0 && unit.heldBy(keys[previous]) && previous != holder) { ++wrong; }
+      previous = holder;
+      unit.release();
+      // the instant after the release: nobody
+      if (unit.heldBy(KEY_A) || unit.heldBy(KEY_B) || unit.heldBy(KEY_C)) { ++wrong; }
+   }
+   requireStringEquals("30000", to_string(handOffs), "7: every hand-off was granted");
+   requireStringEquals("0", to_string(wrong), "7: and no key was ever taken for the holder when it was not");
+}
+
+void TestUnitState::test_thread_keys_are_distinct_and_stable() {
+   TEST_CASE("test_thread_keys_are_distinct_and_stable");
+   // the claim's operations are not secretly guarded by a lock (see UnitState.h, 5b)
+   require(atomic<int>::is_always_lock_free && atomic<uintptr_t>::is_always_lock_free,
+           "the atomics of the claim are lock-free on this platform");
+   const uintptr_t mine = UnitState::currentThreadKey();
+   require(mine != 0, "a key is never 0");
+   require(mine == UnitState::currentThreadKey(), "it is stable for a thread");
+
+   // three live threads, all alive at the same time (a barrier keeps them so): distinct keys
+   uintptr_t keys[3] = { 0, 0, 0 };
+   atomic<int> alive(0);
+   atomic<bool> release(false);
+   vector<thread> crew;
+   for (int i = 0; i < 3; ++i) {
+      crew.emplace_back([&, i] {
+         keys[i] = UnitState::currentThreadKey();
+         alive.fetch_add(1);
+         while (!release.load()) { this_thread::yield(); }
+         if (keys[i] != UnitState::currentThreadKey()) { keys[i] = 0; }
+      });
+   }
+   while (alive.load() < 3) { this_thread::yield(); }
+   const set<uintptr_t> distinct = { mine, keys[0], keys[1], keys[2] };
+   release.store(true);
+   for (thread& worker : crew) { worker.join(); }
+   require(keys[0] != 0 && keys[1] != 0 && keys[2] != 0, "each thread's key was stable over its life");
+   requireStringEquals("4", to_string(distinct.size()), "the keys of four live threads (this one and three) are four different values");
+}
+
+void TestUnitState::test_three_threads_hand_off_in_a_fixed_order() {
+   TEST_CASE("test_three_threads_hand_off_in_a_fixed_order");
+   // Three real threads, A, B and C, each running its part of one script. The script
+   // is ordered by 'step', a sequentially consistent atomic: a thread acts when step has
+   // reached its number and then sets the next one. So the interleaving is the script's, on
+   // any hardware, and the claims' own memory orders are the only thing between threads
+   // beyond what step gives (step orders the threads' actions; it does not hand the
+   // claim state from one thread to another, the claim's release/acquire does that).
+   UnitState unit;
+   atomic<int> step(0);
+   atomic<int> wrongOutcomes(0);
+
+   auto waitFor = [&](int wanted) {
+      const auto deadline = chrono::steady_clock::now() + chrono::seconds(20);
+      while (step.load() != wanted) {
+         if (chrono::steady_clock::now() > deadline) {
+            wrongOutcomes.fetch_add(1000);
+            return false;
+         }
+         this_thread::yield();
+      }
+      return true;
+   };
+   // a probe made now must be refused and must NOT be taken for re-entrance
+   auto refusedAsOverlap = [&](const char* who) {
+      UnitClaim probe(&unit, who, UnitClaim::Reporting::Probe);
+      if (probe.ok() || probe.reentrant()) { wrongOutcomes.fetch_add(1); }
+   };
+
+   thread a([&] {
+      if (!waitFor(0)) return;
+      { UnitClaim first(&unit, "a1", UnitClaim::Reporting::Probe); if (!first.ok()) { wrongOutcomes.fetch_add(1); } }
+      step.store(1);
+      if (!waitFor(2)) return;
+      refusedAsOverlap("a: B holds, A held it earlier");
+      step.store(3);
+      if (!waitFor(5)) return;
+      {
+         UnitClaim again(&unit, "a2", UnitClaim::Reporting::Probe);      // right after B released
+         if (!again.ok() || !unit.heldBy(UnitState::currentThreadKey())) { wrongOutcomes.fetch_add(1); }
+         step.store(6);
+         if (!waitFor(8)) return;
+         UnitClaim nested(&unit, "a nested", UnitClaim::Reporting::Probe);
+         if (nested.ok() || !nested.reentrant()) { wrongOutcomes.fetch_add(1); }
+      }
+      step.store(9);
+      if (!waitFor(10)) return;
+      refusedAsOverlap("a: C holds, A held it earlier");
+      step.store(11);
+   });
+   thread b([&] {
+      if (!waitFor(1)) return;
+      {
+         UnitClaim held(&unit, "b1", UnitClaim::Reporting::Probe);       // A released at step 0
+         if (!held.ok() || !unit.heldBy(UnitState::currentThreadKey())) { wrongOutcomes.fetch_add(1); }
+         step.store(2);
+         if (!waitFor(4)) return;
+         UnitClaim nested(&unit, "b nested", UnitClaim::Reporting::Probe);
+         if (nested.ok() || !nested.reentrant()) { wrongOutcomes.fetch_add(1); }
+      }
+      step.store(5);
+      if (!waitFor(6)) return;
+      refusedAsOverlap("b: A holds, B held it earlier");
+      step.store(7);
+   });
+   thread c([&] {
+      if (!waitFor(3)) return;
+      refusedAsOverlap("c: B holds, C never held it");
+      step.store(4);
+      if (!waitFor(7)) return;
+      refusedAsOverlap("c: A holds");
+      step.store(8);
+      if (!waitFor(9)) return;
+      {
+         UnitClaim held(&unit, "c1", UnitClaim::Reporting::Probe);       // A released at step 8's end
+         if (!held.ok() || !unit.heldBy(UnitState::currentThreadKey())) { wrongOutcomes.fetch_add(1); }
+         step.store(10);
+         if (!waitFor(11)) return;
+      }
+      step.store(12);
+   });
+   a.join();
+   b.join();
+   c.join();
+
+   requireStringEquals("12", to_string(step.load()), "the script ran to its end");
+   requireStringEquals("0", to_string(wrongOutcomes.load()), "every claim and refusal of the three threads came out as scripted");
+   require(!unit.isClaimed(), "and the claim is free at the end");
+}
+
+void TestUnitState::test_three_party_rotation_never_shows_a_stale_key() {
+   TEST_CASE("test_three_party_rotation_never_shows_a_stale_key");
+   // STRESS, supplementary evidence: three threads take the claim in strict rotation (the turn
+   // is passed through an atomic once the claim is released, as the contract demands).
+   // While it is not its turn a thread watches heldBy() with its OWN key as hard as it can:
+   // it released the claim, or has never held it, so it must never be the holder.
+   UnitState unit;
+   const int ROUNDS = 30000;
+   atomic<int> turn(0);
+   atomic<int> started(0);
+   atomic<long> staleKeySeen(0);
+   atomic<long> notGranted(0);
+   atomic<long> wrongHolder(0);
+   uintptr_t keys[3] = { 0, 0, 0 };
+   long counter = 0;      // plain data, protected only by the claim
+
+   auto player = [&](int me) {
+      keys[me] = UnitState::currentThreadKey();
+      started.fetch_add(1);
+      while (started.load() < 3) { this_thread::yield(); }
+      for (int round = 0; round < ROUNDS; ++round) {
+         const auto deadline = chrono::steady_clock::now() + chrono::seconds(30);
+         while (turn.load(memory_order_acquire) != me) {
+            // not my turn: my own key is nobody's business
+            if (unit.heldBy(keys[me])) { staleKeySeen.fetch_add(1); }
+            if (chrono::steady_clock::now() > deadline) { notGranted.fetch_add(1000000); return; }
+         }
+         {
+            UnitClaim claim(&unit, "rotate", UnitClaim::Reporting::Probe);
+            if (!claim.ok()) {
+               notGranted.fetch_add(1);
+            } else {
+               ++counter;
+               if (!unit.heldBy(keys[me])) { wrongHolder.fetch_add(1); }
+               if (unit.heldBy(keys[(me + 1) % 3]) || unit.heldBy(keys[(me + 2) % 3])) { wrongHolder.fetch_add(1); }
+            }
+         }
+         if (unit.heldBy(keys[me])) { staleKeySeen.fetch_add(1); }    // the moment after my release
+         turn.store((me + 1) % 3, memory_order_release);
+      }
+   };
+   thread t0(player, 0);
+   thread t1(player, 1);
+   thread t2(player, 2);
+   t0.join();
+   t1.join();
+   t2.join();
+
+   requireStringEquals("0", to_string(staleKeySeen.load()), "no thread ever saw its own old key as the holder");
+   requireStringEquals("0", to_string(notGranted.load()), "no hand-off was refused");
+   requireStringEquals("0", to_string(wrongHolder.load()), "the holder was always the thread that had the claim");
+   requireStringEquals(to_string(3L * ROUNDS), to_string(counter), "and each owner saw its predecessor's write");
 }

@@ -180,8 +180,10 @@ Concurrency
 -----------
 **Chapeau is not thread safe.** It supports one pattern: a database
 connection and everything that came from it is used by one thread at a
-time. It does not make unsynchronized sharing safe, and it does not check
-that you kept to the rules.
+time. It does not make unsynchronized sharing safe. It does notice, and
+refuse, a call that overlaps another call on the same connection (see
+*Refusals* below), but that is detection of a mistake, not permission to
+share.
 
 A **unit** is one `SQLiteDatabase` (one connection), the result sets
 (`executeQuery()` cursors) it produced that have not been destroyed, and the
@@ -222,13 +224,17 @@ What this does **not** mean:
 - SQLite's serialized mode (`sqlite3_threadsafe() == 1`) does not make
   Chapeau thread safe. It protects SQLite's connection object, not the state
   Chapeau keeps around it.
-- The `inUse()` marker is not a lock. It is a flag that catches a call made
-  from inside another call on the same thread; reading it is not a data race,
-  but it does not wait and cannot be relied on to notice, or to survive, a
-  second thread.
-- Nothing enforces thread confinement yet; it is the caller's responsibility.
-  Defensive checks may be added later (they would be additions: the rules
-  above are the contract either way).
+- The in-use marker (`setInUse()`) is not a lock; it is a compatibility flag.
+  `inUse()` is a probe: it answers `true` while another call is running on the
+  connection (counting and logging nothing), and otherwise as it always did.
+- Detection is not safety. Chapeau sees a call that overlaps another one in
+  time. It does not see sequential interleaving (two threads taking turns, call
+  after call, inside one transaction or on one cursor, with no two calls
+  overlapping), and it does not guard what goes around its calls:
+  `sqliteHandle()` and the SQLite objects obtained from it, the bind methods
+  (the library calls those itself while it holds the connection, as steps of an
+  execute), and a cursor's `statement()`, `setStatement()` and `setParentDB()`.
+  Those are parts of the unit, and the rules above apply to them in full.
 - Three different things are easy to confuse:
   1. **SQLite's compile-time threading support** (`SQLITE_THREADSAFE`, reported
      by `sqlite3_threadsafe()`: 0 none, 1 serialized, 2 multi-thread). Chapeau
@@ -255,14 +261,52 @@ suite is run under ThreadSanitizer in CI (the `tsan` job). The same contract
 is written in the header comments of `Database.h`, `SQLiteDatabase.h` and
 `SQLiteResultSet.h`.
 
-**Refusal counters (infrastructure only).** `Database::refusedCalls()` (the
-calls refused on one database and its result sets) and
-`Database::refusedCallsOnThisThread()` (the calls refused to the calling thread,
-over all databases) exist so that a later version, which will refuse a call made
-while another call is running on the same database instead of racing, can say
-so. In this version nothing is refused, and both always return 0. They do not
-make concurrent use of a database safe or supported, and reading them is not a
-reason to share one.
+### Refusals
+
+Every public call of `SQLiteDatabase` and `SQLiteResultSet`, and the calls
+that change or read the statement cache, take the connection for their
+duration. A call that finds it taken (another thread is inside, or the call came
+from a SQLite callback of the running call) does not wait and does not touch
+the connection: it is **refused** and returns a neutral value. The rules are
+written out in the comment of `Database` in `Database.h`; in short:
+
+- `false`, `nullptr`, `0`, `0.0`, `-1` or `ValueTypeNull`, whatever the call
+  returns for "nothing"; checked accessors clear their out parameter; setters,
+  `close()` and `executeUpdate()` do nothing (`executeUpdate()` also sets its row
+  count to 0).
+- A refused call changes nothing of the call that is running, of any cursor
+  (a refused `next()` consumes no row) or of the error snapshot. A *database* call
+  refused because it came from a callback of the running call on the same thread
+  reports `DBErrorKind::InUse`, as it always has, to its caller, while the running
+  call is still running. That `InUse` is not what the running call leaves behind:
+  when it returns, the error snapshot is its own result -- `DBErrorKind::None`
+  after a query, update or transaction call that succeeded, SQLite's own error
+  after one that failed -- and a successful `next()`, which does not write the
+  snapshot, leaves it as it was before the step. The cursor's `status()` and
+  error code and message are always those of its own step.
+- **A refusal cannot be seen in the return value.** A refused accessor looks
+  like a column that is `0` or NULL, and a refused `next()` like the end of the
+  data (its `status()` is not `Done`, though). To find out, read
+  `Database::refusedCallsOnThisThread()` before and after (the calls the calling
+  thread had refused, over all databases) or `db.refusedCalls()` (the calls
+  refused on one connection, from every thread, never reset; a cursor that
+  outlives its database keeps counting into the same connection state), or turn
+  on `setLogsErrors(true)`: the first refusal on a connection and then the 2nd,
+  4th, 8th ... are written to stdout as `DB Warning [ConcurrentUse]: ... (unit N,
+  <operation>, refusal K on this unit)`. Counting goes on when logging is off.
+- **Destructors cannot refuse.** Destroying a database or a cursor while its
+  connection is taken, by another thread or from inside one of its own calls,
+  prints `Chapeau: fatal: ~SQLiteDatabase ran while its unit ...` (or
+  `~SQLiteResultSet`) to stderr and aborts the process. This is a misuse detector:
+  a destruction that races with a call, rather than finding it already running,
+  can still go wrong before it is noticed. Destroying an idle connection is as
+  ever; so is a synchronized hand-off of an idle one.
+- None of this makes concurrent use supported, and a program that relies on
+  refusals is incorrect. A refusal means a call did not happen.
+
+**ABI.** The `Database` and `SQLiteResultSet` objects each gained one member (a
+reference to the connection state they share). The change adds no virtual
+function, but the object layouts changed: rebuild everything that uses Chapeau.
 
 Testing
 -------

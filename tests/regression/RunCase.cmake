@@ -1,7 +1,8 @@
 # Runs one scenario of a helper executable in its own process and checks how
 # it ended. Invoked by CTest as
 #
-#   cmake -DEXE=<path> -DSCENARIO=<name> -DEXPECT=success|exit:<n>
+#   cmake -DEXE=<path> -DSCENARIO=<name> -DEXPECT=success|exit:<n>|abort
+#         [-DABORT_DIAGNOSTIC=<regex>]
 #         [-DTIMEOUT=<seconds>] [-DKNOWN_DEFECT=<id>]
 #         [-DMATCH_1=<regex> ...] [-DREJECT_1=<regex> ...]
 #         [-DTEMP_ROOT=<dir>] -P RunCase.cmake
@@ -10,7 +11,16 @@
 # timeout or sanitizer, and the case passes only if it equals EXPECT:
 #   - a crash, a hang or a sanitizer report never equals EXPECT, so it can
 #     never be an "expected" result (there is deliberately no way to say
-#     "expect a crash");
+#     "expect a crash"), with ONE narrow exception:
+#   - EXPECT=abort is for a library that must end the process on purpose
+#     (Chapeau's destructors do, when the unit is in use). It passes only if
+#       * the child was ended by SIGABRT (outcome crash:... aborted), not by
+#         any other signal, not by an exit status, not by a hang, and
+#       * the output holds the regular expression ABORT_DIAGNOSTIC, which is
+#         then required (without it the driver refuses to run the case), and
+#       * no sanitizer report is in the output (a report outranks the abort:
+#         the outcome is then "sanitizer", which is never expected).
+#     An unrelated crash, or an abort that did not say why, fails the case.
 #   - a different exit status than EXPECT fails, including exit:1 vs success;
 #   - the child gets TIMEOUT seconds (default 60) and is killed after that, so
 #     a hung child can neither block the suite nor be mistaken for a failure
@@ -34,8 +44,11 @@ include("${here}/Classify.cmake")
 if(NOT DEFINED EXE OR NOT DEFINED SCENARIO OR NOT DEFINED EXPECT)
    message(FATAL_ERROR "RunCase.cmake: EXE, SCENARIO and EXPECT are required")
 endif()
-if(NOT "${EXPECT}" MATCHES "^(success|exit:[0-9]+)$")
-   message(FATAL_ERROR "RunCase.cmake: EXPECT must be success or exit:<n>, not '${EXPECT}'")
+if(NOT "${EXPECT}" MATCHES "^(success|exit:[0-9]+|abort)$")
+   message(FATAL_ERROR "RunCase.cmake: EXPECT must be success, exit:<n> or abort, not '${EXPECT}'")
+endif()
+if("${EXPECT}" STREQUAL "abort" AND (NOT DEFINED ABORT_DIAGNOSTIC OR "${ABORT_DIAGNOSTIC}" STREQUAL ""))
+   message(FATAL_ERROR "RunCase.cmake: EXPECT=abort requires ABORT_DIAGNOSTIC, the text the abort must print")
 endif()
 if(NOT DEFINED TIMEOUT)
    set(TIMEOUT 60)
@@ -115,7 +128,14 @@ function(case_fail message)
    message(FATAL_ERROR "${message}")
 endfunction()
 
-if(NOT "${outcome}" STREQUAL "${EXPECT}")
+if("${EXPECT}" STREQUAL "abort")
+   if(NOT "${outcome}" MATCHES "^crash:.*[Aa]bort")
+      case_fail("unexpected outcome '${outcome}' for ${SCENARIO} (expected an abort, SIGABRT, and nothing else)")
+   endif()
+   if(NOT all MATCHES "${ABORT_DIAGNOSTIC}")
+      case_fail("${SCENARIO} aborted, but its output does not hold the required diagnostic: ${ABORT_DIAGNOSTIC}")
+   endif()
+elseif(NOT "${outcome}" STREQUAL "${EXPECT}")
    if(DEFINED KNOWN_DEFECT AND NOT "${KNOWN_DEFECT}" STREQUAL "")
       case_fail("known defect ${KNOWN_DEFECT} is still present: ${SCENARIO} ended with '${outcome}', a fixed implementation ends with '${EXPECT}'")
    endif()
@@ -139,4 +159,4 @@ if(leftoverProblem)
    case_fail("temporary workspace problem: ${leftoverProblem}")
 endif()
 
-message("OK: ${SCENARIO} ended with '${outcome}' as expected")
+message("OK: ${SCENARIO} ended with '${outcome}' as expected (${EXPECT})")

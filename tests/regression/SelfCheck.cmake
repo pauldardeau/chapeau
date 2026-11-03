@@ -115,6 +115,39 @@ if(lastSeconds GREATER 30)
    set(problems "${problems}\n[hang] the driver took ${lastSeconds}s for a 2s timeout")
 endif()
 
+# EXPECT=abort: the one narrow exception to "a crash can never be expected". It needs
+# SIGABRT, and the diagnostic, and nothing else.
+run_driver("an abort that says why is accepted when an abort is expected" pass "crash:"
+   "OK: abort_with_diagnostic ended with"
+   -DSCENARIO=abort_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+
+run_driver("an abort that does not say why is refused" fail "crash:"
+   "does not hold the required diagnostic"
+   -DSCENARIO=abort -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+
+run_driver("a different crash is refused even if it said the right thing" fail "crash:"
+   "expected an abort"
+   -DSCENARIO=segv_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+
+run_driver("success is refused when an abort is expected" fail success ""
+   -DSCENARIO=ok -DEXPECT=abort "-DABORT_DIAGNOSTIC=hello")
+
+run_driver("an exit status is refused when an abort is expected" fail "exit:3" ""
+   -DSCENARIO=exit3 -DEXPECT=abort "-DABORT_DIAGNOSTIC=exits")
+
+run_driver("a hang is refused when an abort is expected" fail timeout ""
+   -DSCENARIO=hang -DEXPECT=abort "-DABORT_DIAGNOSTIC=hangs" -DTIMEOUT=2)
+
+run_driver("a sanitizer report outranks an abort that says the right thing" fail sanitizer ""
+   -DSCENARIO=sanitizer_then_abort -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+
+run_driver("an expected abort needs a diagnostic to look for" fail ""
+   "requires ABORT_DIAGNOSTIC"
+   -DSCENARIO=abort_with_diagnostic -DEXPECT=abort)
+
+run_driver("an abort that is NOT expected still fails with its diagnostic present" fail "crash:" ""
+   -DSCENARIO=abort_with_diagnostic -DEXPECT=success)
+
 # KNOWN_DEFECT changes only the wording
 run_driver("a known defect that still crashes keeps failing" fail "crash:"
    "known defect CH-00 is still present"

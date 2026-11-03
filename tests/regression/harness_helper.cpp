@@ -9,6 +9,9 @@
 // segv                 dies from SIGSEGV with the default action (a sanitizer
 //                      handler, if linked, is removed first so this stays a
 //                      plain crash)
+// abort_with_diagnostic  prints "helper fatal: reason X" on stderr, then std::abort()
+// segv_with_diagnostic   prints the same line, then dies from SIGSEGV
+// sanitizer_then_abort   prints an ASan-style report, then std::abort()
 // hang                 never ends
 // sanitizer_exit0      prints a UBSan-style report and exits 0
 // sanitizer_exit1      prints an ASan-style report and exits 1
@@ -43,6 +46,23 @@ int main(int argc, char** argv) {
    }
    if (!std::strcmp(scenario, "abort")) {
       std::fflush(stdout);
+      std::abort();
+   }
+   if (!std::strcmp(scenario, "abort_with_diagnostic")) {
+      std::fprintf(stderr, "helper fatal: reason X\n");
+      std::fflush(stderr);
+      std::abort();
+   }
+   if (!std::strcmp(scenario, "segv_with_diagnostic")) {
+      std::fprintf(stderr, "helper fatal: reason X\n");
+      std::fflush(stderr);
+      std::signal(SIGSEGV, SIG_DFL);
+      std::raise(SIGSEGV);
+      return 0;
+   }
+   if (!std::strcmp(scenario, "sanitizer_then_abort")) {
+      std::fprintf(stderr, "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\nhelper fatal: reason X\n");
+      std::fflush(stderr);
       std::abort();
    }
    if (!std::strcmp(scenario, "segv")) {

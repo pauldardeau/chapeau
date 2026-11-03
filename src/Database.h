@@ -139,6 +139,62 @@ const char* dbErrorKindName(DBErrorKind kind);
  *     pool; checkedOut() and setCheckedOut() are plain flags that Chapeau
  *     does not read.
  *
+ * What Chapeau detects, and what it does about it
+ *
+ * Every public call of SQLiteDatabase and of SQLiteResultSet, and the calls that
+ * change or read the statement cache (setShouldCacheStatements(),
+ * setStatementCacheLimit(), clearCachedStatements(), cachedStatementForQuery()),
+ * marks the unit as taken for the duration of the call, with one atomic
+ * compare-exchange. A call that finds the unit already taken does not wait and
+ * does not touch the unit (no SQLite call, no cache, no cursor): it is REFUSED.
+ * That happens when another thread is inside the unit, and when a SQLite
+ * callback of the running call (rule 9) calls back into it on the same thread.
+ *
+ * A refused call returns a neutral value:
+ *  - false: next(), open(), goodConnection(), the four transaction calls,
+ *    inTransaction(), and the checked column accessors (which also clear their
+ *    out parameter to 0 or an empty string);
+ *  - nullptr: executeQuery(), cachedStatementForQuery(), and the column
+ *    accessors that return a pointer;
+ *  - 0, 0.0 or false: the numeric and bool column accessors, getColumnCount();
+ *    ValueTypeNull from getTypeForColumnIndex(); -1 from columnIndexForName()
+ *    and lastInsertRowId();
+ *  - nothing: close(), executeUpdate() (which also sets its row count to 0), and
+ *    the setters. A refused setter does not change the setting.
+ * It changes nothing of the call that is running, of any cursor (a refused
+ * next() consumes no row, a refused close() leaves the cursor as it was) or of
+ * the database's error snapshot. The one exception: a database call refused
+ * because the thread that made it is the thread that is running the unit (from a
+ * SQLite callback) reports DBErrorKind::InUse, as such calls always have. A
+ * result set never does, since its database may be gone.
+ *
+ * A refused call cannot say so in its return value: a refused accessor looks like
+ * a legitimate 0 or NULL column, a refused next() like the end of the data. The
+ * caller learns of it from:
+ *  - refusedCallsOnThisThread(): how many calls THIS thread has had refused (over
+ *    all databases). Read it before and after a stretch of code; a change means a
+ *    call in between was refused. A refused next() also leaves status() unchanged
+ *    (not Done), unlike the real end of the data.
+ *  - refusedCalls(): how many calls on this unit were refused, whoever made them.
+ *    It never decreases and survives the database in a cursor that outlives it.
+ *  - the log, if setLogsErrors(true): one line on stdout for the first refusal on
+ *    a unit and then for the 2nd, 4th, 8th, ... ("DB Warning [ConcurrentUse]: ...
+ *    (unit N, <operation>, refusal K on this unit)"), so a loop that is refused a
+ *    million times writes about twenty lines. Counting goes on when logging is off.
+ *
+ * inUse() is a probe: it answers true if the unit is taken, without counting a
+ * refusal, logging, writing the snapshot or looking at SQLite; otherwise it
+ * answers as it always has.
+ *
+ * Destructors cannot refuse. Destroying a database or a result set while the unit
+ * is taken (by another thread, or from inside a call on this one) writes
+ * "Chapeau: fatal: ~SQLiteDatabase ran while its unit (N) was in use ..." to stderr
+ * and ends the process with std::abort(). A unit that is idle, with the hand-off
+ * synchronization of rule 4, is destroyed as ever.
+ *
+ * This is detection of misuse by overlap, not thread safety, and not a way to
+ * share a unit: a program that depends on refusals is incorrect.
+ *
  * What this does not mean:
  *  - Unsynchronized access to one connection from several threads is not
  *    supported, whatever the operations are, reads included. A violation is a
@@ -147,24 +203,40 @@ const char* dbErrorKindName(DBErrorKind kind);
  *    (sqlite3_threadsafe() == 1) protects SQLite's connection object; it does
  *    nothing for Chapeau's state around it, which is the part the rules above
  *    are about.
- *  - The in-use marker (SQLiteDatabase::inUse(), DBErrorKind::InUse) is not a
- *    lock. It is a flag that catches a call made from inside another call of
- *    the same database (re-entrance on one thread). Reading it is not a data
- *    race (it is atomic), but it does not wait, is set only by some of the
- *    database's calls (executeQuery, executeUpdate, lastInsertRowId; not
- *    next(), close() or open()), and is not a reliable detector of two threads:
- *    do not depend on it to find, or to survive, a violation.
+ *  - The in-use marker (SQLiteDatabase::setInUse(), DBErrorKind::InUse) is not a
+ *    lock. It is a flag that is set while executeQuery(), executeUpdate() or
+ *    lastInsertRowId() runs. It is kept for compatibility and is not what refuses
+ *    overlapping calls (the claim does, see "What Chapeau detects" above).
+ *    SQLiteDatabase::inUse() is a probe of the unit (see below).
  *  - What is safe on its own, without a unit: reading or setting a single
- *    setting (the logging, crash, trace and checked-out flags, the busy timeout
- *    of a database that is not open), reading statementCacheLimit() and
- *    shouldCacheStatements(), reading the error snapshot (each of the three
- *    getters returns a value that was published whole), and reading a result
- *    set's status() and, once that is final, its error. Nothing else is: the
- *    statement cache, the set of result sets, the statements and the
+ *    flag (the logging, crash, trace and checked-out flags, setInUse()),
+ *    reading the busy timeout, statementCacheLimit() and shouldCacheStatements(),
+ *    reading the error snapshot (each of the three getters returns a value that
+ *    was published whole), reading a result set's status() and, once that is
+ *    final, its error, reading the refusal counters, and asking inUse(). Setting the busy
+ *    timeout, the cache switch or the cache limit is a call like the others: it
+ *    takes the claim and is refused if another call is running. Nothing else is
+ *    safe: the statement cache, the set of result sets, the statements and the
  *    connection are only for the one thread that has the unit.
- *  - Nothing in Chapeau enforces confinement. Keeping to the rules is the
- *    caller's responsibility. A later version may check some of them
- *    defensively; what is documented here is the contract either way.
+ *  - Chapeau does not make a unit thread safe, and detection is not safety.
+ *    The claim refuses a call that OVERLAPS another call in time. It cannot see
+ *    a violation that does not overlap. In particular it does not see sequential
+ *    interleaving: two threads that take turns, call after call, on one unit
+ *    (for instance both working inside one open transaction, or one stepping a
+ *    cursor that the other has just read from) are never refused, because no
+ *    two of their calls overlap; whether that is correct is the application's
+ *    to decide (rule 8 says the transaction belongs to the connection).
+ *  - It does not guard what bypasses the public calls: sqliteHandle() and the
+ *    sqlite3* and sqlite3_stmt* obtained from it or from cachedStatementForQuery();
+ *    the bind methods (bindInt(), ... and the Database::bind(...) overloads, which
+ *    the library itself calls while it holds the claim, as steps of an execute);
+ *    and the statement(), setStatement() and setParentDB() accessors of a result
+ *    set. They are parts of the unit and rules 1 and 6 apply to them in full.
+ *  - It does not make destruction concurrent-safe. A destructor that finds the
+ *    unit in use ends the process (see below); that is a misuse detector, not a
+ *    guarantee: if the destruction itself races with a call, the check and the
+ *    teardown are not atomic with each other and the other thread may already be
+ *    using a half-destroyed object.
  *  - The process-wide sinks are the application's: errors logged by
  *    setLogsErrors() go to stdout, and diagnostics go to Chaudiere's Logger.
  *    The Logger the application installs must itself tolerate being called from
@@ -645,9 +717,9 @@ public:
     * How many calls the CALLING THREAD has had refused, over all databases in the
     * process (a per-thread count, 0 for a thread that has had none). A call is
     * refused when it is made on a unit (a database and its result sets) while
-    * another call on that unit is running; the refusal itself, and what a refused
-    * call returns, are for the milestone that activates the claims. Until then no
-    * call is ever refused and this is always 0.
+    * another call on that unit is running (see "What Chapeau detects" in the
+    * comment of this class); it returns a neutral value, which is why the return
+    * value cannot say so.
     *
     * It is meant to be read before and after a stretch of code on one thread: a
     * change means that a call made by this thread in between was refused, which
@@ -662,8 +734,7 @@ public:
     * created (a monotonically increasing count; it is never reset; it wraps
     * around only after 2^64 refusals). It can be read at any time, from any
     * thread, without any call being refused, and it counts the refusals of
-    * every thread: it does not say whose call was refused. Until the claims are
-    * activated no call is refused and it is always 0. It does not make
+    * every thread: it does not say whose call was refused. It does not make
     * concurrent use of a database safe or supported.
     */
    std::uint64_t refusedCalls() const;
@@ -695,6 +766,10 @@ protected:
    // The unit state shared by this database and its result sets (internal, see
    // UnitState.h). Never null.
    std::shared_ptr<UnitState> unitState() const;
+
+   // The same state as the plain pointer that a UnitClaim takes: no reference
+   // count is touched. Valid for as long as this object is.
+   UnitState* unitStatePtr() const { return m_unit.get(); }
 
    // The cache operations that the library's own code uses. The public
    // cachedStatementForQuery() and clearCachedStatements() do their work here

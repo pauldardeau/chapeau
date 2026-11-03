@@ -88,6 +88,24 @@ class Date;
  * hand a result set to a thread while the database stays with another.
  * "Destroyed at any time, before or after the database" is about order, not
  * about concurrency: the destruction still must not overlap a use of the unit.
+ *
+ * Refusals: next(), close(), getColumnCount(), getTypeForColumnIndex(),
+ * columnIndexForName() and every column accessor take the unit's claim for the
+ * duration of the call. If the unit is taken by another call (another thread,
+ * or a SQLite callback of the running call) the call is refused: it touches
+ * nothing and returns what a finished result set returns, next() false,
+ * columns 0, false, nullptr, getColumnCount() 0, ValueTypeNull,
+ * columnIndexForName() -1, and the checked accessors clear their out parameter.
+ * A refusal looks like a NULL column or the end of the data; only
+ * Database::refusedCallsOnThisThread() (or refusedCalls() on the database), and
+ * the log, tell them apart, and status() is left as it was (a refused next() is
+ * not Done). A refusal never writes the database's error snapshot and never
+ * touches the database, which may be gone: the result set reaches the unit
+ * through its own reference. Destroying a result set whose unit is taken ends
+ * the process (see "What Chapeau detects" in Database). status(), lastErrorCode()
+ * and lastErrorMessage() are not calls on the unit and are not refused;
+ * statement(), setStatement() and setParentDB() are parts of the unit and are
+ * not guarded.
  */
 class SQLiteResultSet : public DBResultSet {
 

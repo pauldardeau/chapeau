@@ -8,6 +8,7 @@
 #include "UnitState.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "Database.h"
@@ -63,36 +64,6 @@ std::uintptr_t UnitState::currentThreadKey() {
 
 //******************************************************************************
 
-bool UnitState::tryClaim(std::uintptr_t holder) {
-   int expected = 0;
-   if (!m_claimed.compare_exchange_strong(expected, 1,
-                                          std::memory_order_acq_rel,
-                                          std::memory_order_relaxed)) {
-      return false;
-   }
-
-   m_holder.store(holder, std::memory_order_relaxed);
-   return true;
-}
-
-//******************************************************************************
-
-void UnitState::release() {
-   // the holder first, then the claim: whoever takes the claim next sets its own
-   m_holder.store(0, std::memory_order_relaxed);
-   m_claimed.store(0, std::memory_order_release);
-}
-
-//******************************************************************************
-
-bool UnitState::heldBy(std::uintptr_t holder) const {
-   return holder != 0 &&
-          m_claimed.load(std::memory_order_acquire) != 0 &&
-          m_holder.load(std::memory_order_relaxed) == holder;
-}
-
-//******************************************************************************
-
 std::uint64_t UnitState::recordRefusal(const char* operation) {
    // the unit's count first: it is what the log line reports
    const std::uint64_t count = m_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -132,36 +103,27 @@ RefusalRecord UnitState::threadRecord() {
 //******************************************************************************
 //******************************************************************************
 
-UnitClaim::UnitClaim(UnitState* unit, const char* operation, Reporting reporting) :
-   m_unit(unit),
-   m_ok(true),
-   m_held(false),
-   m_reentrant(false) {
-   if (unit == nullptr) {
-      return;
-   }
-
-   const std::uintptr_t me = UnitState::currentThreadKey();
-
-   if (unit->tryClaim(me)) {
-      m_held = true;
-      return;
-   }
-
+void UnitClaim::refused(std::uintptr_t me, const char* operation, Reporting reporting) {
    m_ok = false;
-   m_reentrant = unit->heldBy(me);
+   m_reentrant = m_unit->heldBy(me);
 
    if (reporting == Reporting::Report) {
-      unit->recordRefusal(operation);
+      m_unit->recordRefusal(operation);
    }
 }
 
 //******************************************************************************
 
-UnitClaim::~UnitClaim() {
-   if (m_held) {
-      m_unit->release();
-   }
+void UnitClaim::abortBusy(const UnitState* unit, const char* who, bool sameThread) {
+   // one line, one fprintf: nothing shared, nothing allocated
+   std::fprintf(stderr,
+                "Chapeau: fatal: %s ran while its unit (%llu) was in use by %s; "
+                "a database and its result sets must be idle when they are destroyed. Aborting.\n",
+                who,
+                static_cast<unsigned long long>(unit != nullptr ? unit->serial() : 0),
+                sameThread ? "an earlier call on this same thread" : "a call on another thread");
+   std::fflush(stderr);
+   std::abort();
 }
 
 //******************************************************************************

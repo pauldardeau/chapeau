@@ -18,6 +18,7 @@
 #include "scoped_temp_dir.h"
 #include "SQLiteDatabase.h"
 #include "SQLiteResultSet.h"
+#include "UnitState.h"
 #include "DBStatementArgs.h"
 #include "DBBool.h"
 #include "DBData.h"
@@ -5802,6 +5803,8 @@ struct InUseProbe {
    SQLiteResultSet* cursorToEnd = nullptr;   // ended from inside the function, if set
    DBResultSet* nested = nullptr;
    DBErrorKind nestedKind = DBErrorKind::None;
+   DBErrorKind kindAfterClose = DBErrorKind::Sqlite;   // what the snapshot said right after the close() attempt (Sqlite = not recorded)
+   bool busyInside = false;                            // inUse(), asked from inside the call
    bool called = false;
 } g_inUseProbe;
 
@@ -5809,8 +5812,10 @@ void callAnotherOperation(sqlite3_context* context, int, sqlite3_value**) {
    InUseProbe& p = g_inUseProbe;
    p.called = true;
    if (p.cursorToEnd != nullptr) {
-      p.cursorToEnd->close();   // a result set ends while the update is running
+      p.cursorToEnd->close();   // a result set is asked to end while the update is running
+      p.kindAfterClose = p.db->lastErrorKind();
    }
+   p.busyInside = p.db->inUse();
    p.nested = p.db->executeQuery("select 1");
    p.nestedKind = p.db->lastErrorKind();
    sqlite3_result_int(context, 1);
@@ -5835,20 +5840,40 @@ void TestSQLiteFoundation::test_inuse_marker_survives_a_cursor_ending() {
    require(g_inUseProbe.nested == nullptr && g_inUseProbe.nestedKind == DBErrorKind::InUse, "its call of the database was refused with InUse");
    requireLastError(db, DBErrorKind::None, 0, "", "and the update's success cleared the error");
 
-   // 2. a result set that ends in the middle of the update used to clear the
-   //    marker of the update, so that the next call from inside it got in. This
-   //    is the one deliberate difference: only the call that set the marker
-   //    clears it, and the call is still refused.
+   // 2. A result set that is asked to end in the middle of the update. Until H1a-12g
+   //    it ended, and used to clear the marker of the update, so that the next call
+   //    from inside it got in (H1a-12d made it leave the marker alone). Now the
+   //    close() is REFUSED: the result set is a part of the unit, and the unit is
+   //    inside the update. Nothing of the result set changes, nothing of the
+   //    update changes, the marker stays up, and the refusal is on record.
    unique_ptr<SQLiteResultSet> other(openCursor(db, ITEMS_BY_ID));
    require(other && other->next(), "a result set that is live");
+   require(other->status() == DBResultSetStatus::Row, "positioned on a row");
+   const long idBefore = other->longForColumnIndex(0);
+
    g_inUseProbe = InUseProbe();
    g_inUseProbe.db = &db;
    g_inUseProbe.cursorToEnd = other.get();
-   require(exec(db, "update items set qty = other_op() where id = 1"), "the update succeeds");
-   require(g_inUseProbe.called && other->status() == DBResultSetStatus::Done, "the function ran and ended the result set");
+   const std::uint64_t unitBefore = db.refusedCalls();
+   const std::uint64_t threadBefore = Database::refusedCallsOnThisThread();
+   require(exec(db, "update items set qty = other_op() where id = 1"), "the active database operation succeeds");
+   require(g_inUseProbe.called, "the function ran");
+   require(other->status() == DBResultSetStatus::Row, "the close was refused: the result set did not end");
+   require(g_inUseProbe.kindAfterClose == DBErrorKind::None,
+           "and the refused close left the database's error snapshot alone (it says nothing, not InUse)");
+   require(g_inUseProbe.busyInside, "inUse() from inside the call says busy");
    require(g_inUseProbe.nested == nullptr && g_inUseProbe.nestedKind == DBErrorKind::InUse,
-           "and the call that followed it was still refused");
+           "the call that followed was refused with InUse: the marker was not cleared by the refused close");
+   requireLongEquals(2, (long) (db.refusedCalls() - unitBefore), "two refusals on the unit (the close and the nested query; inUse() is a probe)");
+   requireLongEquals(2, (long) (Database::refusedCallsOnThisThread() - threadBefore), "and on this thread");
+   require(Database::refusedCallsOnThisThread() == UnitState::threadRecord().sequence, "the thread's record agrees");
+   require(std::string(UnitState::threadRecord().operation) == "executeQuery", "the most recent one is the nested query");
    delete g_inUseProbe.nested;
+
+   // the result set is still valid, and carries on after the update
+   require(other->longForColumnIndex(0) == idBefore, "the result set still reads its row");
+   require(other->next(), "and still advances");
+   require(other->status() == DBResultSetStatus::Row, "to the next row");
    other.reset();
 
    // 3. after every call the marker is down again
@@ -5956,8 +5981,11 @@ void TestSQLiteFoundation::test_settings_can_be_read_while_they_are_set() {
    // Not open: there is no connection, so the busy-timeout setter has nothing to
    // call, and the statement cache is empty, so the cache setters have nothing
    // to evict. What is left is exactly the scalars: one thread sets them, this
-   // one reads them. (A setter that does touch the cache or the connection is
-   // not for another thread to overlap with anything, and is not tested so.)
+   // one reads them. (The setters of the busy timeout and of the cache take the
+   // unit's claim since H1a-12g; they are called from one thread here, and the
+   // reader asks nothing that claims, inUse() included: inUse() is a probe and
+   // would, by design, make a setter that it overlaps with be refused. The probe
+   // has tests of its own in TestUnitClaims.)
    SQLiteDatabase db(":memory:");
    atomic<bool> done(false);
    atomic<long> outOfRange(0);
@@ -5982,7 +6010,6 @@ void TestSQLiteFoundation::test_settings_can_be_read_while_they_are_set() {
       db.crashOnErrors();
       db.traceExecution();
       db.checkedOut();
-      db.inUse();
       db.shouldCacheStatements();
       const int t = db.busyRetryTimeout();
       if (t != 100 && t != 7 && t != SQLiteDatabase::DEFAULT_BUSY_TIMEOUT_MS) {

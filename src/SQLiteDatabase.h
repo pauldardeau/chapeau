@@ -37,12 +37,17 @@ class DBData;
  * What this class adds to them:
  *  - sqliteHandle() is part of the unit. Using the handle while another thread
  *    uses the database is a violation like any other.
- *  - inUse() / the in-use marker is not a lock. It is a flag, set while one of
- *    executeQuery(), executeUpdate() or lastInsertRowId() runs and cleared when
- *    that call returns, and by nothing else (a result set ending no longer
- *    clears it); it only catches a re-entrant call on the same thread
- *    (DBErrorKind::InUse). It is atomic, so reading it is not a data race, but
- *    another thread cannot rely on seeing it.
+ *  - A call made while another call of the unit is running is refused (a
+ *    neutral value, a count, a log line if logging is on; see "What Chapeau
+ *    detects" in Database). This covers every public call of this class except
+ *    sqliteHandle() and the bind methods, which are parts of the unit. A refused
+ *    call made from a SQLite callback of the running call, on its thread, also
+ *    reports DBErrorKind::InUse.
+ *  - inUse() is a probe, safe to ask while a call is running: it answers true when
+ *    the unit is taken (counting nothing, logging nothing), and otherwise as it
+ *    always has: true while the in-use marker is set (setInUse(), and while
+ *    executeQuery(), executeUpdate() or lastInsertRowId() runs) or a transaction
+ *    is open. The marker is a compatibility flag, not a lock.
  *  - SQLite's serialized mode makes the sqlite3* connection safe to call from
  *    several threads. It does not protect the statement cache, the set of live
  *    result sets, the error snapshot or the cursor counts kept here.
@@ -238,6 +243,47 @@ private:
    // finalized -- and returns that message, which a result set keeps.
    std::string stepFailed(const char* operation, int rc, const std::string& sql);
 
+   // A call refused because it was made from inside a call of this unit on this
+   // thread (an SQL function, an authorizer or a hook that used the database
+   // again) reports InUse, so that its caller can tell, as it always could. That
+   // InUse is about the nested call and must not be what the outer call leaves
+   // behind: when the outer call returns, the snapshot is its own result -- its
+   // own failure, or what it was before it if it succeeded and writes none.
+   //
+   // The first such refusal therefore keeps the snapshot as it was, and the
+   // NestedRefusalScope that a call holds puts it back when the call ends, if
+   // nothing but a refusal has written to it since (an outer call's own failure,
+   // or its own clearing of the snapshot on success, has: that stays). Plain
+   // data: it is touched only by the holder of the unit's claim.
+   void complainAboutNestedCall();
+   void settleNestedRefusal();
+
+   struct NestedRefusal {
+      NestedRefusal() : noted(false), before() {}
+      bool noted;               // a refusal of this kind was reported during the current call
+      LastError before;         // the snapshot as it was before the first one
+   };
+   NestedRefusal m_nestedRefusal;
+
+   class NestedRefusalScope {
+   public:
+      // 'database' may be null (a result set that has lost its database)
+      explicit NestedRefusalScope(SQLiteDatabase* database) : m_database(database) {
+         if (m_database != nullptr) {
+            m_database->m_nestedRefusal.noted = false;   // nothing noted before this call is this call's
+         }
+      }
+      ~NestedRefusalScope() {
+         if (m_database != nullptr && m_database->m_nestedRefusal.noted) {
+            m_database->settleNestedRefusal();
+         }
+      }
+      NestedRefusalScope(const NestedRefusalScope&) = delete;
+      NestedRefusalScope& operator=(const NestedRefusalScope&) = delete;
+   private:
+      SQLiteDatabase* m_database;
+   };
+
    // The number of arguments is not the number of the statement's parameters.
    // Nothing has been bound when this is called.
    void bindCountFailed(const char* operation,
@@ -345,7 +391,8 @@ private:
    // destructor, the transaction helpers, goodConnection(), inUse()) calls only
    // these, never a public method, so that a guard taken once in a public
    // method is not reached again through it. Same behavior as the public
-   // methods; none of them takes a lock or refuses a call.
+   // methods; none of them takes the claim or refuses a call (the public
+   // methods that call them do).
    DBResultSet* executeQueryInternal(const std::string& sql);
    DBResultSet* executeQueryInternal(const std::string& sql,
                                      const DBStatementArgs& args);

@@ -22,6 +22,13 @@
 using namespace chaudiere;
 using namespace chapeau;
 
+namespace {
+
+// what the snapshot says when a call is refused as 'in use' (see complainAboutInUse)
+const char* const IN_USE_MESSAGE = "the database is in use by an operation that has not finished";
+
+}
+
 class MarkInUse {
 public:
    MarkInUse(SQLiteDatabase* db) :
@@ -56,6 +63,11 @@ SQLiteDatabase::SQLiteDatabase(const std::string& aPath) :
 //******************************************************************************
 
 SQLiteDatabase::~SQLiteDatabase() {
+   // A destructor cannot refuse: a unit in use by another call is a misuse that
+   // ends the process with a diagnostic (see UnitClaim::abortUnlessOk).
+   UnitClaim claim(unitStatePtr(), "~SQLiteDatabase", UnitClaim::Reporting::Probe);
+   claim.abortUnlessOk("~SQLiteDatabase");
+
    // closing invalidates the live result sets, then empties the cache
    closeInternal();
 }
@@ -81,6 +93,15 @@ sqlite3* SQLiteDatabase::sqliteHandle() {
 //******************************************************************************
 
 bool SQLiteDatabase::open() {
+   UnitClaim claim(unitStatePtr(), "open");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    clearLastError();
 
    if (m_db != nullptr) {
@@ -493,6 +514,15 @@ void SQLiteDatabase::discardCachedStatement(DBStatement* statement) {
 //******************************************************************************
 
 void SQLiteDatabase::close() {
+   UnitClaim claim(unitStatePtr(), "close");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return;
+   }
+
    closeInternal();
 }
 
@@ -534,20 +564,37 @@ void SQLiteDatabase::closeInternal() {
 //******************************************************************************
 
 bool SQLiteDatabase::goodConnection() {
-   if (!m_db) {
-      fail(DBErrorKind::NoConnection, 0, "there is no database connection",
-           "goodConnection");
-      return false;
+   DBResultSet* rs = nullptr;
+
+   {
+      UnitClaim claim(unitStatePtr(), "goodConnection");
+      if (!claim.ok()) {
+         // a call made from inside a call of this unit, on its own thread, is the
+         // in-use case; any other refusal says nothing to the snapshot
+         if (claim.reentrant()) {
+            complainAboutNestedCall();
+         }
+         return false;
+      }
+
+      if (!m_db) {
+         fail(DBErrorKind::NoConnection, 0, "there is no database connection",
+              "goodConnection");
+         return false;
+      }
+
+      // executeQuery() starts by clearing the error and records its own failure,
+      // which is then this one. The query is the whole of the database's part of
+      // this call; the result set is ended while the claim is held, and let go of
+      // after it as a separate step (its destructor takes the claim itself).
+      rs = executeQueryInternal("select name from sqlite_master where type='table'");
+
+      if (rs != nullptr) {
+         static_cast<SQLiteResultSet*>(rs)->closeInternal();
+      }
    }
 
-   // executeQuery() starts by clearing the error and records its own failure,
-   // which is then this one. The query is the whole of the database's part of
-   // this call; the result set is let go of after it, as a separate step.
-   DBResultSet* rs =
-      executeQueryInternal("select name from sqlite_master where type='table'");
-
    if (rs != nullptr) {
-      static_cast<SQLiteResultSet*>(rs)->closeInternal();
       delete rs;
       return true;
    }
@@ -559,10 +606,38 @@ bool SQLiteDatabase::goodConnection() {
 
 void SQLiteDatabase::complainAboutInUse() {
    fail(DBErrorKind::InUse, 0,
-        "the database is in use by an operation that has not finished",
+        IN_USE_MESSAGE,
         "use of the database");
 
    if (m_crashOnErrors) {
+   }
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::complainAboutNestedCall() {
+   if (!m_nestedRefusal.noted) {
+      // the first one of this call: keep what is there, so that it can be put back
+      m_nestedRefusal.before = lastErrorRecord();
+      m_nestedRefusal.noted = true;
+   }
+
+   complainAboutInUse();
+}
+
+//******************************************************************************
+
+void SQLiteDatabase::settleNestedRefusal() {
+   m_nestedRefusal.noted = false;
+
+   // Put the snapshot back only if what is on it is still the InUse of a refused
+   // call. If the outer call wrote its own result since (a failure, or the
+   // clearing of the snapshot that a success does), that result is the one to keep.
+   const LastError now = lastErrorRecord();
+   if (now.kind == DBErrorKind::InUse && now.code == 0 && now.message == IN_USE_MESSAGE) {
+      setLastError(m_nestedRefusal.before.kind,
+                   m_nestedRefusal.before.code,
+                   m_nestedRefusal.before.message);
    }
 }
 
@@ -575,6 +650,15 @@ bool SQLiteDatabase::hadError() const {
 //******************************************************************************
 
 long long int SQLiteDatabase::lastInsertRowId() {
+   UnitClaim claim(unitStatePtr(), "lastInsertRowId");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return -1;
+   }
+
    if (nullptr == m_db) {
       fail(DBErrorKind::NoConnection, 0, "there is no database connection",
            "lastInsertRowId");
@@ -711,12 +795,22 @@ bool SQLiteDatabase::bindString(const std::string& value,
 //******************************************************************************
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql) {
+   UnitClaim claim(unitStatePtr(), "executeQuery");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return nullptr;
+   }
+
    return executeQueryInternal(sql);
 }
 
 //******************************************************************************
 
 DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql) {
+   NestedRefusalScope nestedRefusals(this);
    clearLastError();
 
    if (nullptr == m_db) {
@@ -788,6 +882,15 @@ DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql) {
 
 DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
                                           const DBStatementArgs& args) {
+   UnitClaim claim(unitStatePtr(), "executeQuery");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return nullptr;
+   }
+
    return executeQueryInternal(sql, args);
 }
 
@@ -795,6 +898,7 @@ DBResultSet* SQLiteDatabase::executeQuery(const std::string& sql,
 
 DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql,
                                                   const DBStatementArgs& args) {
+   NestedRefusalScope nestedRefusals(this);
    clearLastError();
 
    if (nullptr == m_db) {
@@ -889,6 +993,16 @@ DBResultSet* SQLiteDatabase::executeQueryInternal(const std::string& sql,
 
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    unsigned long& rowsAffectedCount) {
+   UnitClaim claim(unitStatePtr(), "executeUpdate");
+   if (!claim.ok()) {
+      rowsAffectedCount = 0L;
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    return executeUpdateInternal(sql, rowsAffectedCount);
 }
 
@@ -1014,6 +1128,16 @@ bool SQLiteDatabase::executeUpdateInternal(const std::string& sql,
 bool SQLiteDatabase::executeUpdate(const std::string& sql,
                                    const DBStatementArgs& args,
                                    unsigned long& affectedRowsCount) {
+   UnitClaim claim(unitStatePtr(), "executeUpdate");
+   if (!claim.ok()) {
+      affectedRowsCount = 0L;
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    return executeUpdateInternal(sql, args, affectedRowsCount);
 }
 
@@ -1171,6 +1295,15 @@ bool SQLiteDatabase::executeUpdateInternal(const std::string& sql,
 //******************************************************************************
 
 bool SQLiteDatabase::rollback() {
+   UnitClaim claim(unitStatePtr(), "rollback");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    unsigned long rowsAffectedCount = 0L;
    // whether a transaction is open afterwards is SQLite's to say, see
    // inTransaction()
@@ -1180,6 +1313,15 @@ bool SQLiteDatabase::rollback() {
 //******************************************************************************
 
 bool SQLiteDatabase::commit() {
+   UnitClaim claim(unitStatePtr(), "commit");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    unsigned long rowsAffectedCount = 0L;
    // whether a transaction is open afterwards is SQLite's to say, see
    // inTransaction()
@@ -1189,6 +1331,15 @@ bool SQLiteDatabase::commit() {
 //******************************************************************************
 
 bool SQLiteDatabase::beginDeferredTransaction() {
+   UnitClaim claim(unitStatePtr(), "beginDeferredTransaction");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    unsigned long rowsAffectedCount = 0L;
    return executeUpdateInternal("BEGIN DEFERRED TRANSACTION;", rowsAffectedCount);
 }
@@ -1196,6 +1347,15 @@ bool SQLiteDatabase::beginDeferredTransaction() {
 //******************************************************************************
 
 bool SQLiteDatabase::beginTransaction() {
+   UnitClaim claim(unitStatePtr(), "beginTransaction");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    unsigned long rowsAffectedCount = 0L;
    return executeUpdateInternal("BEGIN EXCLUSIVE TRANSACTION;", rowsAffectedCount);
 }
@@ -1230,6 +1390,15 @@ void SQLiteDatabase::setCrashOnErrors(bool flag) {
 //******************************************************************************
 
 bool SQLiteDatabase::inUse() {
+   // A probe: "is the unit busy?" is what a pool asks, so a busy unit is the
+   // answer (true) and not a violation: nothing is counted, logged or recorded,
+   // and SQLite is not looked at without the claim. When the claim is ours the
+   // answer is what it always was.
+   UnitClaim probe(unitStatePtr(), "inUse", UnitClaim::Reporting::Probe);
+   if (!probe.ok()) {
+      return true;
+   }
+
    return m_inUse || inTransactionInternal();
 }
 
@@ -1242,6 +1411,15 @@ void SQLiteDatabase::setInUse(bool b) {
 //******************************************************************************
 
 bool SQLiteDatabase::inTransaction() {
+   UnitClaim claim(unitStatePtr(), "inTransaction");
+   if (!claim.ok()) {
+      // from inside a call of this unit on this thread: the in-use case
+      if (claim.reentrant()) {
+         complainAboutNestedCall();
+      }
+      return false;
+   }
+
    return inTransactionInternal();
 }
 
@@ -1297,6 +1475,11 @@ int SQLiteDatabase::busyRetryTimeout() {
 //******************************************************************************
 
 void SQLiteDatabase::setBusyRetryTimeout(int busyRetryTimeout) {
+   UnitClaim claim(unitStatePtr(), "setBusyRetryTimeout");
+   if (!claim.ok()) {
+      return;
+   }
+
    m_busyRetryTimeout = (busyRetryTimeout > 0) ? busyRetryTimeout : 0;
 
    // on an open connection the new value takes effect at once; otherwise
