@@ -1,10 +1,17 @@
 #include "test_sqlite_database.h"
 #include "fs_test_case.h"
+#include "scoped_temp_dir.h"
 #include "SQLiteDatabase.h"
 #include "OSUtils.h"
 
 using namespace std;
 using namespace chapeau;
+
+// The cases that need a directory (FSTestCase) work in one of their own, named
+// for the case, inside a scratch directory that ScopedTempDir creates with a
+// unique name under the system temporary directory. FSTestCase creates the case
+// directory (which must not exist beforehand) and removes it again; ScopedTempDir
+// removes the scratch directory. No fixed path such as /tmp is involved.
 
 
 TestSQLiteDatabase::TestSQLiteDatabase() :
@@ -62,7 +69,8 @@ void TestSQLiteDatabase::runTests() {
 
 void TestSQLiteDatabase::test_constructor() {
    TEST_CASE("test_constructor");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_ctor";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_ctor").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -80,7 +88,8 @@ void TestSQLiteDatabase::test_sqliteLibVersion() {
 
 void TestSQLiteDatabase::test_databasePath() {
    TEST_CASE("test_databasePath");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_databasePath";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_databasePath").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -90,7 +99,8 @@ void TestSQLiteDatabase::test_databasePath() {
 
 void TestSQLiteDatabase::test_sqliteHandle() {
    TEST_CASE("test_sqliteHandle");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_sqliteHandle";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_sqliteHandle").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -106,7 +116,8 @@ void TestSQLiteDatabase::test_sqliteHandle() {
 
 void TestSQLiteDatabase::test_open() {
    TEST_CASE("test_open");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_open";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_open").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -115,7 +126,8 @@ void TestSQLiteDatabase::test_open() {
 
 void TestSQLiteDatabase::test_close() {
    TEST_CASE("test_close");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_close";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_close").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -127,7 +139,8 @@ void TestSQLiteDatabase::test_close() {
 
 void TestSQLiteDatabase::test_goodConnection() {
    TEST_CASE("test_goodConnection");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_goodConnection";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_goodConnection").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -309,7 +322,8 @@ void TestSQLiteDatabase::test_setCheckedOut() {
 
 void TestSQLiteDatabase::test_busyRetryTimeout() {
    TEST_CASE("test_busyRetryTimeout");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_busyRetryTimeout";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_busyRetryTimeout").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);
@@ -324,7 +338,8 @@ void TestSQLiteDatabase::test_busyRetryTimeout() {
 
 void TestSQLiteDatabase::test_setBusyRetryTimeout() {
    TEST_CASE("test_setBusyRetryTimeout");
-   string test_dir = "/tmp/test_chapeau_sqlitedb_test_setBusyRetryTimeout";
+   chapeau_tests::ScopedTempDir scratch("chapeau-sqlitedb");
+   string test_dir = (scratch.path() / "test_chapeau_sqlitedb_test_setBusyRetryTimeout").string();
    FSTestCase test_case(*this, test_dir);
    string file_path = chaudiere::OSUtils::pathJoin(test_dir, "test.sqlite3");
    SQLiteDatabase db(file_path);

@@ -206,7 +206,12 @@ void TestSQLiteFoundation::test_scoped_temp_dir() {
       require(first_path != second_path, "each directory gets its own name");
       require(fs::is_directory(first_path), "first directory exists");
       require(fs::is_directory(second_path), "second directory exists");
-      require(first_path.parent_path() == fs::temp_directory_path(),
+      // equivalent(), not ==: on Windows temp_directory_path() ends in a
+      // separator and the parent_path() of a child does not, so the two spell
+      // the same directory differently. Both exist here (first_path was checked
+      // just above), which equivalent() needs; any error reads as "not equal".
+      error_code ec;
+      require(fs::equivalent(first_path.parent_path(), fs::temp_directory_path(), ec),
               "directories are created in the system temporary directory");
 
       ofstream(first.file("inside.txt")) << "x";
