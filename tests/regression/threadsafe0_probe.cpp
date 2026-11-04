@@ -32,11 +32,11 @@
 #include <string>
 #include <vector>
 
-#include <unistd.h>
-
 #include "sqlite3.h"
 
+#include "process_setup.h"
 #include "scoped_temp_dir.h"
+#include "stdout_capture.h"
 #include "SQLiteDatabase.h"
 
 using namespace chapeau;
@@ -93,30 +93,10 @@ void installCountingVfs() {
 
 // ---- what the library writes to stdout (the logging contract) -----------------
 
-std::string captureStdout(const std::function<void()>& body) {
-   std::fflush(stdout);
-   std::FILE* file = std::tmpfile();
-   const int saved = ::dup(1);
-   if (file == nullptr || saved < 0) {
-      body();
-      return std::string("(stdout could not be captured)");
-   }
-   ::dup2(::fileno(file), 1);
-   body();
-   std::fflush(stdout);
-   ::dup2(saved, 1);
-   ::close(saved);
-
-   std::string out;
-   std::rewind(file);
-   char buffer[512];
-   size_t got = 0;
-   while ((got = std::fread(buffer, 1, sizeof buffer, file)) > 0) {
-      out.append(buffer, got);
-   }
-   std::fclose(file);
-   return out;
-}
+// What the library writes to stdout while body() runs (stdout_capture.h: the same code on POSIX and Windows). A capture that cannot be made
+// throws CaptureError, which main() reports as a failure; it is never an empty result, because the scenarios below read an empty
+// result as "nothing was printed".
+using chapeau_harness::captureStdout;
 
 size_t lines(const std::string& text) {
    size_t n = 0;
@@ -281,6 +261,9 @@ std::map<std::string, Scenario> scenarios() {
             }
             if (!logs) {
                check(label + "nothing is written", output.empty());
+               if (!output.empty()) {
+                  evidence(label + "unexpected output was captured: " + output);
+               }
                continue;
             }
             evidence(label + "output: " + output);
@@ -315,6 +298,9 @@ std::map<std::string, Scenario> scenarios() {
 
 
 int main(int argc, char** argv) {
+   // Windows: no dialogs, abort() fails fast and says so (nothing on other platforms)
+   chapeau_harness::prepareProcess();
+
    // output must survive a crash or a kill
    std::setvbuf(stdout, nullptr, _IONBF, 0);
 
@@ -340,7 +326,14 @@ int main(int argc, char** argv) {
    chapeau_tests::ScopedTempDir dir("chapeau-threadsafe0");
    g_dir = dir.path().string();
 
-   found->second();
+   try {
+      found->second();
+   } catch (const chapeau_harness::CaptureError& e) {
+      // a capture that could not be set up, read or restored fails the scenario; it is never taken as "nothing was printed"
+      std::fprintf(stderr, "CAPTURE ERROR: %s\n", e.what());
+      std::printf("CHECK stdout could be captured: FAIL (%s)\n", e.what());
+      ++g_failures;
+   }
 
    std::printf("SCENARIO %s finished, %d failed check(s)\n", argv[1], g_failures);
    return g_failures == 0 ? 0 : 1;

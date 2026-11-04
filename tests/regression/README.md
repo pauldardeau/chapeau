@@ -125,7 +125,14 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   nothing was opened: a counting VFS sees no `xOpen`, no file appears,
   `sqliteHandle()` is null and SQLite's memory use is unchanged (the counter is
   shown to work by a raw `sqlite3_open`). The `=2` (multi-thread) program shows
-  that a library with some threading support is not refused.
+  that a library with some threading support is not refused. With the option on, the
+  default 64 registered tests become 70: `regression_threadsafe0_library_is_what_the_build_says`,
+  `_open_is_refused`, `_repeated_refusal_leaves_the_object_valid`,
+  `_refusal_is_logged_once_and_silent_when_off`, and
+  `regression_threadsafe2_library_is_what_the_build_says`, `_open_is_allowed`
+  (`ctest -L sqlite-threading` runs just these six). The option makes
+  `threadsafe0.cmake` enable the C language (the amalgamation is C); without the option
+  no C compiler is needed. On Windows see "Windows" below.
 
 ## Seeing the defects
 
@@ -142,7 +149,8 @@ other host skips it. The test names, scenarios, labels, time limits and MATCH/RE
 requirements are the same. What differs, and why:
 
 * **Process preparation** (`process_setup.h`, called first in `main()` of
-  `chapeau_probe`, `chapeau_concurrency_probe` and `harness_helper`; it does nothing on
+  `chapeau_probe`, `chapeau_concurrency_probe`, `harness_helper`, `threadsafe0_probe` and
+  `threadsafe2_probe`; it does nothing on
   other platforms). It switches off the Windows Error Reporting / JIT-debugger dialogs
   (`SetErrorMode`), sends the debug CRT's assertion and error reports to stderr (a message
   box would hold the scenario until its time limit), makes `abort()` end in a fast fail
@@ -173,5 +181,23 @@ requirements are the same. What differs, and why:
   `CaptureError`, which `main()` reports as a failed check: it is never an empty result,
   because an empty result means "nothing was printed". One capture at a time, from one
   thread (descriptor 1 is process-wide).
-* The opt-in `threadsafe0` set (`-DCHAPEAU_THREADSAFE0_TEST=ON`) is not supported on Windows
-  yet (`threadsafe0_probe.cpp` includes `<unistd.h>`).
+* **The opt-in SQLite-threading set** (`-DCHAPEAU_THREADSAFE0_TEST=ON`, 70 registered tests
+  instead of 64) runs on Windows too. `threadsafe0_probe.cpp` uses the same
+  `stdout_capture.h`; both opt-in probes call `prepareProcess()`. The pinned SQLite 3.37.2 amalgamation
+  (`sqlite3.c` and `sqlite3.h`, checked against the SHA-256 values in `threadsafe0.cmake`) has to be
+  supplied, unpacked, with `-DCHAPEAU_THREADSAFE0_SQLITE_DIR=<dir>`; without it CMake would
+  download the pinned zip, as on POSIX. The library itself still needs a SQLite to link (the
+  `SQLite3_INCLUDE_DIR` and `SQLite3_LIBRARY` of the default Windows configuration). Verified
+  with the Visual Studio 17 2022 generator, x64, Debug and Release:
+
+      cmake -S . -B build-ts0 -G "Visual Studio 17 2022" -A x64 ^
+            -DSQLite3_INCLUDE_DIR=<dir> -DSQLite3_LIBRARY=<sqlite3 .lib> ^
+            -DCHAPEAU_THREADSAFE0_TEST=ON -DCHAPEAU_THREADSAFE0_SQLITE_DIR=<amalgamation dir>
+      cmake --build build-ts0 --config Release
+      ctest --test-dir build-ts0 -C Release
+
+  Expected: 70 of 70 passing (64 of 64 without the option). Not verified: other
+  generators or compilers on Windows (Ninja, clang-cl, MinGW), and running these tests with
+  chapeau configured as a subdirectory of another project (only the build of the
+  `=2` program was tried there). `threadsafe2_probe.cpp` captures no output; it calls
+  `prepareProcess()` like the other probes.

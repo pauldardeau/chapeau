@@ -88,7 +88,8 @@ function(chapeau_add_pinned_sqlite_probe target source mode)
    target_compile_definitions(${target}_sqlite PRIVATE
       SQLITE_THREADSAFE=${mode}
       SQLITE_OMIT_LOAD_EXTENSION=1)
-   target_compile_options(${target}_sqlite PRIVATE -w)
+   # (/W0 for MSVC: its -w spelling collides with the generator's own /W level and is itself reported, as D9025)
+   target_compile_options(${target}_sqlite PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/W0,-w>)
 
    add_executable(${target} ${source} ${ts0ChapeauSources} $<TARGET_OBJECTS:${target}_sqlite>)
    target_compile_features(${target} PRIVATE cxx_std_20)
