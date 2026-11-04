@@ -135,4 +135,40 @@ AddressSanitizer build (`-DCMAKE_CXX_FLAGS=-fsanitize=address
 -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address`) for a reliable verdict. A scenario
 that ends in `success` in a plain build is not evidence that its defect is fixed.
 
-The harness is POSIX-only (signals); it is skipped on Windows.
+## Windows
+
+The harness runs on native Windows with MSVC (Debug and Release) as well as on POSIX hosts; any
+other host skips it. The test names, scenarios, labels, time limits and MATCH/REJECT
+requirements are the same. What differs, and why:
+
+* **Process preparation** (`process_setup.h`, called first in `main()` of
+  `chapeau_probe`, `chapeau_concurrency_probe` and `harness_helper`; it does nothing on
+  other platforms). It switches off the Windows Error Reporting / JIT-debugger dialogs
+  (`SetErrorMode`), sends the debug CRT's assertion and error reports to stderr (a message
+  box would hold the scenario until its time limit), makes `abort()` end in a fast fail
+  (status `0xC0000409`) in Debug as well as in Release, and installs a `SIGABRT` handler
+  that writes the line `CHAPEAU-HARNESS: SIGABRT` and returns, so `abort()` carries on as
+  before. It installs no unhandled-exception filter.
+* **What `abort` means** (`EXPECT abort`, the four destructor cases). The status
+  `0xC0000409` is not unique to `abort()` (a failed stack check, `__fastfail`,
+  `std::terminate()` and a program that simply returns it give it too), and `raise(SIGABRT)`
+  or a Debug `abort()` without the preparation end with plain exit status 3. So a case passes
+  only if the status is a fast fail, **and** the marker line is in the output, **and** the
+  `ABORT_DIAGNOSTIC` is, **and** no sanitizer report is, as on POSIX. An exit status (3
+  included), another crash, a plain return of `0xC0000409`, a hang or a missing diagnostic
+  fails it.
+* **Crashes shown as numbers.** `execute_process` names most Windows exceptions ("Access
+  violation", "Exit code 0xc0000409", ...) but reports an unhandled breakpoint and the
+  `0xE...` exceptions as plain numbers. On Windows a numeric result outside 0 to 255 is
+  therefore classified as `crash:status <n>`; 0 to 255 keep their meaning. `harness_helper`'s
+  `segv` is a real access violation on Windows (`raise(SIGSEGV)` only exits with status 3
+  there). `SelfCheck.cmake` has Windows-only checks for all of this.
+* **Known limitation: stdout capture.** `captureStdout` in `chapeau_probe.cpp` is a no-op on
+  Windows (it returns an empty string), so the in-process "this line was written" checks
+  cannot run there: `errors_logged_once_with_kind_code_and_message` and
+  `ch27_refusal_is_logged_once_and_silent_when_off` **fail** on Windows, and
+  `errors_silent_when_logging_is_off` passes while 17 of its 35 checks ("nothing is printed")
+  cannot fail, so that pass does not verify them. Portable capture is the next step; until
+  then CTest on Windows reports those two failures.
+* The opt-in `threadsafe0` set (`-DCHAPEAU_THREADSAFE0_TEST=ON`) is not supported on Windows
+  yet (`threadsafe0_probe.cpp` includes `<unistd.h>`).

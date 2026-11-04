@@ -24,6 +24,30 @@ endif()
 
 set(problems "")
 
+# the classification rules themselves (Classify.cmake is the driver's own file)
+get_filename_component(driverDir "${DRIVER}" DIRECTORY)
+include("${driverDir}/Classify.cmake")
+
+# expect_classified(<label> <execute_process result text> <the outcome it must be classified as>)
+function(expect_classified label rc expected)
+   chapeau_classify("${rc}" "" got)
+   if("${got}" STREQUAL "${expected}")
+      message("self-check ok: ${label}")
+   else()
+      set(problems "${problems}\n[${label}] '${rc}' was classified '${got}', expected '${expected}'" PARENT_SCOPE)
+   endif()
+endfunction()
+
+# expect_failfast(<label> <outcome> <TRUE|FALSE>)
+function(expect_failfast label outcome expected)
+   chapeau_is_failfast("${outcome}" got)
+   if("${got}" STREQUAL "${expected}")
+      message("self-check ok: ${label}")
+   else()
+      set(problems "${problems}\n[${label}] '${outcome}' is a fast fail: ${got}, expected ${expected}" PARENT_SCOPE)
+   endif()
+endfunction()
+
 # run_driver(<label> <expect: pass|fail> <outcome the driver must report>
 #            <extra regex the message must match, or ""> <driver args...>)
 function(run_driver label expect reportedOutcome messageRegex)
@@ -147,6 +171,63 @@ run_driver("an expected abort needs a diagnostic to look for" fail ""
 
 run_driver("an abort that is NOT expected still fails with its diagnostic present" fail "crash:" ""
    -DSCENARIO=abort_with_diagnostic -DEXPECT=success)
+
+# ---- Windows only: abort() is a fast fail, and some crashes are plain numbers -------------
+# (POSIX has none of this; its checks above are the whole of its self-check.)
+if(CMAKE_HOST_WIN32)
+   # the classification rules, without a process
+   math(EXPR failfastSigned "0xC0000409 - 4294967296")
+   if(NOT "${failfastSigned}" STREQUAL "-1073740791")
+      set(problems "${problems}\n[constant] 0xC0000409 as a signed 32-bit number is ${failfastSigned}, not -1073740791")
+   endif()
+   expect_classified("0 is success" "0" "success")
+   expect_classified("3 is an ordinary exit status" "3" "exit:3")
+   expect_classified("255 is an ordinary exit status" "255" "exit:255")
+   expect_classified("a number above 255 is a crash" "256" "crash:status 256")
+   expect_classified("a negative number is a crash" "-1" "crash:status -1")
+   expect_classified("the unhandled breakpoint (0x80000003), reported as a number, is a crash" "-2147483645" "crash:status -2147483645")
+   expect_classified("a custom SEH exception (0xE0000001), reported as a number, is a crash" "-536870911" "crash:status -536870911")
+   expect_classified("0xC0000409 reported as a signed number is a crash" "-1073740791" "crash:status -1073740791")
+   expect_classified("a textual crash result stays a crash" "Access violation" "crash:Access violation")
+   expect_classified("the fast-fail text stays a crash" "Exit code 0xc0000409" "crash:Exit code 0xc0000409")
+   expect_classified("a timeout stays a timeout" "Process terminated due to timeout" "timeout")
+   expect_failfast("the fast-fail text is a fast fail" "crash:Exit code 0xc0000409\n" TRUE)
+   expect_failfast("the same in upper case is a fast fail" "crash:Exit code 0xC0000409" TRUE)
+   expect_failfast("0xC0000409 as a signed number is a fast fail" "crash:status -1073740791" TRUE)
+   expect_failfast("an access violation is not a fast fail" "crash:Access violation" FALSE)
+   expect_failfast("another Exit code text is not a fast fail" "crash:Exit code 0xc0000005" FALSE)
+   expect_failfast("an unhandled breakpoint is not a fast fail" "crash:status -2147483645" FALSE)
+   expect_failfast("an ordinary exit 3 is not a fast fail" "exit:3" FALSE)
+   expect_failfast("success is not a fast fail" "success" FALSE)
+   expect_failfast("a timeout is not a fast fail" "timeout" FALSE)
+
+   # whole processes
+   run_driver("exit status 255 is accepted when it is expected" pass "exit:255" ""
+      -DSCENARIO=exit255 -DEXPECT=exit:255)
+   run_driver("exit status 255 is not exit status 3" fail "exit:255" ""
+      -DSCENARIO=exit255 -DEXPECT=exit:3)
+   run_driver("an unhandled breakpoint is a crash, refused when success is expected" fail "crash:" ""
+      -DSCENARIO=breakpoint -DEXPECT=success)
+   run_driver("an unhandled breakpoint can never satisfy an expected exit status" fail "crash:" ""
+      -DSCENARIO=breakpoint -DEXPECT=exit:3)
+   run_driver("a custom SEH exception is a crash, refused when success is expected" fail "crash:" ""
+      -DSCENARIO=seh_custom -DEXPECT=success)
+   # (CMake wraps long messages at about 80 columns, so these patterns accept a line break wherever the text has a space)
+   run_driver("a diagnostic followed by an ordinary exit 3 is not an abort" fail "exit:3"
+      "unexpected[ \t\n]+outcome"
+      -DSCENARIO=exit3_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+   run_driver("a diagnostic followed by a plain return of 0xC0000409 is not an abort" fail "crash:"
+      "did[ \t\n]+not[ \t\n]+report[ \t\n]+SIGABRT"
+      -DSCENARIO=return_failfast_status_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+   run_driver("a fast fail that did not go through abort() has no SIGABRT marker and is not an abort" fail "crash:"
+      "did[ \t\n]+not[ \t\n]+report[ \t\n]+SIGABRT"
+      -DSCENARIO=failfast_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+   run_driver("a diagnostic followed by an unhandled breakpoint is not an abort" fail "crash:"
+      "expected[ \t\n]+an[ \t\n]+abort"
+      -DSCENARIO=breakpoint_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X")
+   run_driver("a diagnostic followed by a hang is not an abort" fail timeout ""
+      -DSCENARIO=hang_with_diagnostic -DEXPECT=abort "-DABORT_DIAGNOSTIC=helper fatal: reason X" -DTIMEOUT=2)
+endif()
 
 # KNOWN_DEFECT changes only the wording
 run_driver("a known defect that still crashes keeps failing" fail "crash:"

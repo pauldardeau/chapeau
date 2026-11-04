@@ -19,8 +19,11 @@
 # or listed without failing the build:
 #   cmake --build . --target chapeau_known_defects_report
 
-if(NOT UNIX)
-   message(STATUS "chapeau: subprocess regression harness skipped (POSIX only)")
+# Runs on POSIX hosts and on native Windows with MSVC (Debug and Release). On Windows every program calls
+# chapeau_harness::prepareProcess() (process_setup.h) first, and RunCase.cmake/Classify.cmake have Windows rules; see README.md,
+# "Windows". Any other host is skipped.
+if(NOT UNIX AND NOT (WIN32 AND MSVC))
+   message(STATUS "chapeau: subprocess regression harness skipped (needs a POSIX host or native Windows with MSVC)")
    return()
 endif()
 

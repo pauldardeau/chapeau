@@ -21,6 +21,14 @@
 #       * no sanitizer report is in the output (a report outranks the abort:
 #         the outcome is then "sanitizer", which is never expected).
 #     An unrelated crash, or an abort that did not say why, fails the case.
+#     On Windows "ended by SIGABRT" is not visible in the status: abort() ends in a fast
+#     fail (0xC0000409), which other things also produce. So there the case passes only if
+#       * the status is that fast fail (Classify.cmake: chapeau_is_failfast), and
+#       * the child reported the SIGABRT it went through (the marker line that
+#         process_setup.h writes from its SIGABRT handler), and
+#       * the output holds ABORT_DIAGNOSTIC and no sanitizer report, as above.
+#     An exit status (3 included), another crash, a plain return of 0xC0000409, a fast
+#     fail that did not come from abort(), a hang or a missing diagnostic all fail it.
 #   - a different exit status than EXPECT fails, including exit:1 vs success;
 #   - the child gets TIMEOUT seconds (default 60) and is killed after that, so
 #     a hung child can neither block the suite nor be mistaken for a failure
@@ -129,7 +137,16 @@ function(case_fail message)
 endfunction()
 
 if("${EXPECT}" STREQUAL "abort")
-   if(NOT "${outcome}" MATCHES "^crash:.*[Aa]bort")
+   if(CMAKE_HOST_WIN32)
+      chapeau_is_failfast("${outcome}" isFailfast)
+      if(NOT isFailfast)
+         case_fail("unexpected outcome '${outcome}' for ${SCENARIO} (expected an abort: a fast fail, status 0xC0000409, and nothing else)")
+      endif()
+      # the marker process_setup.h writes from its SIGABRT handler, alone on a line
+      if(NOT all MATCHES "(^|\n)CHAPEAU-HARNESS: SIGABRT(\n|$)")
+         case_fail("${SCENARIO} ended with a fast fail (0xC0000409) but did not report SIGABRT: not an abort()")
+      endif()
+   elseif(NOT "${outcome}" MATCHES "^crash:.*[Aa]bort")
       case_fail("unexpected outcome '${outcome}' for ${SCENARIO} (expected an abort, SIGABRT, and nothing else)")
    endif()
    if(NOT all MATCHES "${ABORT_DIAGNOSTIC}")

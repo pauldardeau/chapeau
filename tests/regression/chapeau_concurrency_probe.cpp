@@ -57,6 +57,7 @@
 
 #include "sqlite3.h"
 
+#include "process_setup.h"
 #include "scoped_temp_dir.h"
 #include "SQLiteDatabase.h"
 #include "SQLiteResultSet.h"
@@ -1947,6 +1948,9 @@ std::map<std::string, Scenario> scenarios() {
 
 
 int main(int argc, char** argv) {
+   // Windows: no dialogs, abort() fails fast and says so (nothing on other platforms)
+   chapeau_harness::prepareProcess();
+
    // output must survive a crash or a kill
    std::setvbuf(stdout, nullptr, _IONBF, 0);
 
