@@ -38,12 +38,9 @@
 #include <memory>
 #include <string>
 #include <vector>
-#ifndef _WIN32
-#include <unistd.h>
-#endif
-
 #include "process_setup.h"
 #include "scoped_temp_dir.h"
+#include "stdout_capture.h"
 #include "SQLiteDatabase.h"
 #include "SQLiteResultSet.h"
 #include "DBStatementArgs.h"
@@ -116,39 +113,10 @@ std::string text(DBResultSet& rs, int column) {
 
 // ---- reporting of errors (H1a-8) --------------------------------------------
 
-#ifndef _WIN32
-// what the library writes to stdout while body() runs; stdout is put back
-// afterwards, so the CHECK lines of the scenario are not mixed into it
-std::string captureStdout(const std::function<void()>& body) {
-   std::fflush(stdout);
-   std::FILE* file = std::tmpfile();
-   const int saved = ::dup(1);
-   if (file == nullptr || saved < 0) {
-      body();
-      return std::string("(stdout could not be captured)");
-   }
-   ::dup2(::fileno(file), 1);
-   body();
-   std::fflush(stdout);
-   ::dup2(saved, 1);
-   ::close(saved);
-
-   std::string out;
-   std::rewind(file);
-   char buffer[512];
-   size_t got = 0;
-   while ((got = std::fread(buffer, 1, sizeof buffer, file)) > 0) {
-      out.append(buffer, got);
-   }
-   std::fclose(file);
-   return out;
-}
-#else
-std::string captureStdout(const std::function<void()>& body) {
-   body();
-   return std::string();
-}
-#endif
+// What the library writes to stdout while body() runs (stdout_capture.h: the same code on POSIX and Windows). A capture that cannot be made
+// throws CaptureError, which main() reports as a failure; it is never an empty result, because the scenarios below read an empty
+// result as "nothing was printed".
+using chapeau_harness::captureStdout;
 
 size_t countOf(const std::string& text, char c) {
    size_t n = 0;
@@ -1060,7 +1028,13 @@ std::map<std::string, Scenario> scenarios() {
          const auto it = expected.find(r.label);
          if (it == expected.end()) {
             check((label + "a success writes nothing").c_str(), r.output.empty());
+            if (!r.output.empty()) {
+               std::printf("      unexpected output was captured: %s", r.output.c_str());
+            }
             continue;
+         }
+         if (r.output.empty()) {
+            std::printf("      no output was captured, but one line was expected\n");
          }
          check((label + "one line is written").c_str(), countOf(r.output, '\n') == 1 && r.output.back() == '\n');
          check((label + "naming the kind, code and message").c_str(),
@@ -1377,7 +1351,14 @@ int main(int argc, char** argv) {
    chapeau_tests::ScopedTempDir dir("chapeau-probe");
    g_path = dir.file("probe.sqlite3");
 
-   found->second();
+   try {
+      found->second();
+   } catch (const chapeau_harness::CaptureError& e) {
+      // a capture that could not be set up, read or restored fails the scenario; it is never taken as "nothing was printed"
+      std::fprintf(stderr, "CAPTURE ERROR: %s\n", e.what());
+      std::printf("CHECK stdout could be captured: FAIL (%s)\n", e.what());
+      ++g_failures;
+   }
 
    std::printf("SCENARIO %s finished, %d failed check(s)\n", argv[1], g_failures);
    return g_failures == 0 ? 0 : 1;

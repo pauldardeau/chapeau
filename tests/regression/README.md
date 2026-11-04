@@ -71,8 +71,8 @@ SIGSEGV, hangs, prints sanitizer-style reports, and leaves or cleans up files.
   one `DB Error [...]` line was written (kind, code, message, operation, SQL) when
   logging is on, that nothing at all was written when it is off, and that the
   return value and the recorded error are the same either way. The busy failure
-  of an update and of a cursor is checked in its own bounded process. (Stdout
-  capture uses POSIX `dup2`; on Windows the capture is a no-op.)
+  of an update and of a cursor is checked in its own bounded process. (The
+  capture is `stdout_capture.h`, the same code on POSIX and Windows; see below.)
 * **Concurrency scenarios** (`concurrency_*` in `chapeau_concurrency_probe.cpp`,
   H1a-12a; labels `regression` and `concurrency`): the patterns that Chapeau
   supports (see the *Concurrency* section of the top-level README), and only
@@ -163,12 +163,15 @@ requirements are the same. What differs, and why:
   therefore classified as `crash:status <n>`; 0 to 255 keep their meaning. `harness_helper`'s
   `segv` is a real access violation on Windows (`raise(SIGSEGV)` only exits with status 3
   there). `SelfCheck.cmake` has Windows-only checks for all of this.
-* **Known limitation: stdout capture.** `captureStdout` in `chapeau_probe.cpp` is a no-op on
-  Windows (it returns an empty string), so the in-process "this line was written" checks
-  cannot run there: `errors_logged_once_with_kind_code_and_message` and
-  `ch27_refusal_is_logged_once_and_silent_when_off` **fail** on Windows, and
-  `errors_silent_when_logging_is_off` passes while 17 of its 35 checks ("nothing is printed")
-  cannot fail, so that pass does not verify them. Portable capture is the next step; until
-  then CTest on Windows reports those two failures.
+* **Stdout capture** (`stdout_capture.h`). The scenarios that say "exactly this line was
+  written" or "nothing was printed" read the process's own stdout while the body runs.
+  `captureStdout(body)` redirects file descriptor 1 into a file in a `ScopedTempDir` of its
+  own (`dup`/`dup2` on POSIX, `_dup`/`_dup2` on Windows), puts it back afterwards (also when
+  the body throws) and removes the directory. It captures what the library writes with
+  `::printf` as well as anything else written to stdout, including the scenario's own CHECK
+  lines inside the body. A capture that cannot be set up, read or restored throws
+  `CaptureError`, which `main()` reports as a failed check: it is never an empty result,
+  because an empty result means "nothing was printed". One capture at a time, from one
+  thread (descriptor 1 is process-wide).
 * The opt-in `threadsafe0` set (`-DCHAPEAU_THREADSAFE0_TEST=ON`) is not supported on Windows
   yet (`threadsafe0_probe.cpp` includes `<unistd.h>`).
