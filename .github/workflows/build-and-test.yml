@@ -114,3 +114,267 @@ jobs:
         run: ctest --test-dir build-ts0 --output-on-failure
         env:
           ASAN_OPTIONS: detect_leaks=1
+
+  # Native Windows: MSVC x64 (Visual Studio 17 2022), static Chapeau, the whole suite
+  # including the opt-in SQLite-threading set (CHAPEAU_THREADSAFE0_TEST=ON), Debug and
+  # Release as two separate jobs of one matrix, each with its own build tree and its own
+  # SQLite static library (/MDd for Debug, /MD for Release).
+  #
+  # SQLite comes from the pinned 3.37.2 amalgamation of tests/regression/threadsafe0.cmake:
+  # its URL and SHA-256 values are read from that file (there is no second copy of
+  # them here), the archive and the extracted sqlite3.c and sqlite3.h are checked
+  # against them, and the same directory is then used twice: to build the ordinary
+  # static SQLite library that Chapeau links, and as CHAPEAU_THREADSAFE0_SQLITE_DIR for
+  # the two pinned test programs (which check the hashes again).
+  #
+  # The job fails unless the registered tests are exactly the expected ones, all of them
+  # ran and passed, and the classic suite reports the expected totals. Nothing is
+  # optional and nothing continues on error.
+  windows:
+    name: windows (${{ matrix.config }})
+    runs-on: windows-2022
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [ Debug, Release ]
+    env:
+      CONFIG: ${{ matrix.config }}
+      # raise these together with the tests, on purpose
+      EXPECTED_TESTS: "70"
+      EXPECTED_CASES: "203"
+      EXPECTED_ASSERTIONS: "19132"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Toolchain
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Fail([string]$m) { Write-Host "::error::$m"; exit 1 }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $req = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          # (not "| Select-Object -First 1" on a native command: closing the pipe early makes it exit non-zero)
+          $vs = @(& $vswhere -latest -products '*' -requires $req -property installationPath)[0]
+          $vsVersion = @(& $vswhere -latest -products '*' -requires $req -property catalog_productDisplayVersion)[0]
+          if (-not $vs) { Fail 'no Visual Studio with the x64 C++ tools was found' }
+          $toolset = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1).Trim()
+          $os = Get-CimInstance Win32_OperatingSystem
+          $runner = "$($os.Caption) $($os.Version), image $env:ImageOS $env:ImageVersion"
+          $visualStudio = "Visual Studio $vsVersion, MSVC toolset $toolset"
+          $cmakeVersion = @(cmake --version)[0]
+          Write-Host "Runner:   $runner"
+          Write-Host "Compiler: $visualStudio"
+          Write-Host "CMake:    $cmakeVersion"
+          Add-Content -Path $env:GITHUB_ENV -Value "VS_PATH=$vs"
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_RUNNER=$runner"
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_VS=$visualStudio"
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_CMAKE=$cmakeVersion"
+      - name: Pinned SQLite (download, verify, build the static library)
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Fail([string]$m) { Write-Host "::error::$m"; exit 1 }
+          function Sha([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          # the one pin: tests/regression/threadsafe0.cmake
+          $pins = Get-Content 'tests/regression/threadsafe0.cmake' -Raw
+          function Pin([string]$name) {
+            $m = [regex]::Match($pins, '(?m)^set\(' + $name + '\s+"([^"]+)"\)')
+            if (-not $m.Success) { Fail "$name not found in tests/regression/threadsafe0.cmake" }
+            $m.Groups[1].Value
+          }
+          $version = Pin 'CHAPEAU_TS0_VERSION'
+          $url     = Pin 'CHAPEAU_TS0_URL'
+          $zipSha  = Pin 'CHAPEAU_TS0_ZIP_SHA256'
+          $cSha    = Pin 'CHAPEAU_TS0_C_SHA256'
+          $hSha    = Pin 'CHAPEAU_TS0_H_SHA256'
+
+          $root = Join-Path $env:RUNNER_TEMP 'sqlite-pinned'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $zip = Join-Path $root 'sqlite-amalgamation.zip'
+          $downloaded = $false
+          foreach ($attempt in 1..3) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "download attempt $attempt failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+          if (-not $downloaded) { Fail "could not download $url" }
+          # a wrong archive is never retried and never unpacked
+          $zipActual = Sha $zip
+          if ($zipActual -ne $zipSha) { Fail "archive SHA-256 mismatch: expected $zipSha, got $zipActual" }
+
+          $unpacked = Join-Path $root 'unpacked'
+          Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
+          $dirs = @(Get-ChildItem -LiteralPath $unpacked -Directory)
+          if ($dirs.Count -ne 1) { Fail "expected one directory in the archive, found $($dirs.Count)" }
+          $src = $dirs[0].FullName
+          foreach ($pair in @(@('sqlite3.c', $cSha), @('sqlite3.h', $hSha))) {
+            $p = Join-Path $src $pair[0]
+            if (-not (Test-Path -LiteralPath $p)) { Fail "$p not found" }
+            $actual = Sha $p
+            if ($actual -ne $pair[1]) { Fail "$($pair[0]) SHA-256 mismatch: expected $($pair[1]), got $actual" }
+          }
+          $declared = [regex]::Match((Get-Content (Join-Path $src 'sqlite3.h') -Raw), '#define SQLITE_VERSION\s+"([^"]+)"')
+          if (-not $declared.Success -or $declared.Groups[1].Value -ne $version) { Fail "sqlite3.h does not declare SQLite $version" }
+
+          # the ordinary SQLite library Chapeau links (serialized mode, the default), with
+          # the C runtime of the configuration it is linked into
+          $out = Join-Path $root "lib-$env:CONFIG"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $flags = if ($env:CONFIG -eq 'Debug') { '/Zi /Od /MDd' } else { '/O2 /MD' }
+          $lib = Join-Path $out 'sqlite3.lib'
+          $bat = Join-Path $out 'build-sqlite.bat'
+          @(
+            '@echo off',
+            "call `"$env:VS_PATH\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 || exit /b 1",
+            "cl /nologo $flags /DSQLITE_THREADSAFE=1 /Fo`"$out\sqlite3.obj`" /Fd`"$out\sqlite3.pdb`" /c `"$src\sqlite3.c`" || exit /b 1",
+            "lib /nologo /OUT:`"$lib`" `"$out\sqlite3.obj`" || exit /b 1"
+          ) | Set-Content -Path $bat -Encoding ascii
+          cmd /c $bat
+          if ($LASTEXITCODE -ne 0) { Fail "building the SQLite static library failed (exit $LASTEXITCODE)" }
+          if (-not (Test-Path -LiteralPath $lib)) { Fail "$lib was not produced" }
+
+          Write-Host "SQLite ${version}: archive and sqlite3.c/sqlite3.h match the pins; library $lib ($flags)"
+          Add-Content -Path $env:GITHUB_ENV -Value "SQLITE_DIR=$($src.Replace('\', '/'))"
+          Add-Content -Path $env:GITHUB_ENV -Value "SQLITE_LIB=$($lib.Replace('\', '/'))"
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_SQLITE=SQLite $version (archive, sqlite3.c and sqlite3.h verified against the pins in tests/regression/threadsafe0.cmake); static library: cl $flags /DSQLITE_THREADSAFE=1"
+      - name: Configure
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Fail([string]$m) { Write-Host "::error::$m"; exit 1 }
+          $log = "configure-$env:CONFIG.log"
+          cmake -S . -B "build-$env:CONFIG" -G 'Visual Studio 17 2022' -A x64 `
+            -DCHAPEAU_BUILD_TESTS=ON `
+            "-DSQLite3_INCLUDE_DIR=$env:SQLITE_DIR" "-DSQLite3_LIBRARY=$env:SQLITE_LIB" `
+            -DCHAPEAU_THREADSAFE0_TEST=ON "-DCHAPEAU_THREADSAFE0_SQLITE_DIR=$env:SQLITE_DIR" `
+            2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { Fail "configure failed (exit $LASTEXITCODE)" }
+          $cxx = Select-String -Path $log -Pattern 'The CXX compiler identification is' | Select-Object -First 1
+          if (-not $cxx) { Fail 'the configure log does not name the C++ compiler' }
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_CXX=C++ compiler $($cxx.Line.Trim() -replace '^-- The CXX compiler identification is ', '')"
+      - name: Build
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Fail([string]$m) { Write-Host "::error::$m"; exit 1 }
+          $cfg = $env:CONFIG
+          $build = "build-$cfg"
+          $log = "build-$cfg.log"
+          # the full log is kept in the file; the console shows what matters
+          cmake --build $build --config $cfg --parallel 4 2>&1 |
+            Tee-Object -FilePath $log |
+            ForEach-Object { if ($_ -match 'warning [A-Z]+\d+|error [A-Z]+\d+|FAILED|Build succeeded|Time Elapsed') { Write-Host $_ } }
+          if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE); the end of the log follows`n$((Get-Content $log -Tail 40) -join "`n")" }
+
+          foreach ($name in 'test_chapeau', 'chapeau_probe', 'chapeau_concurrency_probe', 'chapeau_harness_helper', 'chapeau_threadsafe0_probe', 'chapeau_threadsafe2_probe') {
+            $found = @(Get-ChildItem -Path $build -Recurse -Filter "$name.exe" | Where-Object { $_.Directory.Name -eq $cfg })
+            if ($found.Count -ne 1) { Fail "expected exactly one $cfg $name.exe, found $($found.Count)" }
+          }
+
+          $warnings = @(Select-String -Path $log -Pattern 'warning [A-Z]+\d+' |
+            ForEach-Object { ($_.Line.Trim() -replace '\s*\[[^\]]*\]\s*$', '') } | Sort-Object -Unique)
+          $inRegression = @($warnings | Where-Object { $_ -match 'tests[\\/]regression' }).Count
+          Write-Host "unique compiler warning lines: $($warnings.Count) ($inRegression in tests/regression)"
+          Add-Content -Path $env:GITHUB_ENV -Value "INFO_WARNINGS=$($warnings.Count) unique warning lines, $inRegression in tests/regression"
+      - name: Test
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Fail([string]$m) { Write-Host "::error::$m"; exit 1 }
+          $cfg = $env:CONFIG
+          $build = "build-$cfg"
+          $expTests = [int]$env:EXPECTED_TESTS
+          $expCases = [int]$env:EXPECTED_CASES
+          $expAssertions = [int]$env:EXPECTED_ASSERTIONS
+
+          function Registered([string[]]$extra) {
+            $listing = ctest --test-dir $build -C $cfg -N @extra | Out-String
+            $m = [regex]::Match($listing, 'Total Tests: (\d+)')
+            if (-not $m.Success) { Fail "ctest -N printed no test total`n$listing" }
+            [int]$m.Groups[1].Value
+          }
+          $registered = Registered @()
+          $registeredSqlite = Registered @('-L', 'sqlite-threading')
+
+          # no --output-on-failure: -V already puts every test's output in the log
+          $log = "ctest-$cfg.log"
+          ctest --test-dir $build -C $cfg --no-tests=error --timeout 400 -V 2>&1 |
+            Tee-Object -FilePath $log |
+            ForEach-Object { if ($_ -match '^\s*\d+/\d+ Test\s+#|tests passed|tests failed|^The following tests FAILED|^\s+\d+ - |Total Test time') { Write-Host $_ } }
+          $rc = $LASTEXITCODE
+
+          $text = Get-Content $log -Raw
+          $total = [regex]::Match($text, '(\d+)% tests passed, (\d+) tests failed out of (\d+)')
+          $passedTests = @([regex]::Matches($text, '(?m)^\s*\d+/\d+ Test\s+#\d+: (\S+) \.+\s*Passed') | ForEach-Object { $_.Groups[1].Value })
+          $notPassed = @([regex]::Matches($text, '(?m)^\s*\d+/\d+ Test\s+#\d+: (\S+) \.+\s*(\*\*\*[A-Za-z ]+|Not Run|Skipped|Disabled)') | ForEach-Object { "$($_.Groups[1].Value): $($_.Groups[2].Value)" })
+          $sqliteTests = @($passedTests | Where-Object { $_ -match '^regression_threadsafe[02]_' }).Count
+          $destructorTests = @($passedTests | Where-Object { $_ -match '^regression_destructor_aborts_' }).Count
+          $selfcheck = @($passedTests | Where-Object { $_ -eq 'harness_selfcheck' }).Count
+          $selfcheckSteps = [regex]::Matches($text, 'self-check ok:').Count
+          $classic = [regex]::Match($text, 'test_chapeau overall: (\d+) classic suite\(s\), (\d+) test case\(s\), (\d+) assertion\(s\) executed, (\d+) failed')
+
+          $problems = @()
+          if ($rc -ne 0) { $problems += "ctest exited with $rc" }
+          if ($registered -ne $expTests) { $problems += "$registered tests registered, expected $expTests" }
+          if ($registeredSqlite -ne 6) { $problems += "$registeredSqlite tests carry the sqlite-threading label, expected 6" }
+          if (-not $total.Success) { $problems += 'ctest printed no summary line' }
+          elseif ([int]$total.Groups[3].Value -ne $expTests -or [int]$total.Groups[2].Value -ne 0) { $problems += "ctest: $($total.Value)" }
+          if ($passedTests.Count -ne $expTests) { $problems += "$($passedTests.Count) tests passed, expected $expTests" }
+          if ($notPassed.Count -ne 0) { $problems += "tests not passed: $($notPassed -join '; ')" }
+          if ($sqliteTests -ne 6) { $problems += "$sqliteTests of the 6 SQLite-threading tests passed" }
+          if ($destructorTests -ne 4) { $problems += "$destructorTests of the 4 destructor-abort tests passed" }
+          if ($selfcheck -ne 1) { $problems += 'the harness self-check did not pass' }
+          if (-not $classic.Success) { $problems += 'the classic suite printed no totals' }
+          elseif ([int]$classic.Groups[2].Value -ne $expCases -or [int]$classic.Groups[3].Value -ne $expAssertions -or [int]$classic.Groups[4].Value -ne 0) { $problems += "classic suite: $($classic.Value), expected $expCases cases / $expAssertions assertions / 0 failed" }
+
+          # what the two pinned programs say about the library they were built with
+          $evidence = @()
+          foreach ($pair in @(@('chapeau_threadsafe0_probe', 'threadsafe0_library_is_what_the_build_says'), @('chapeau_threadsafe2_probe', 'threadsafe2_library_is_what_the_build_says'))) {
+            $exe = Get-ChildItem -Path $build -Recurse -Filter "$($pair[0]).exe" | Where-Object { $_.Directory.Name -eq $cfg } | Select-Object -First 1
+            if ($exe) { $evidence += @(& $exe.FullName $pair[1] | Where-Object { $_ -match '^EVIDENCE sqlite3_(libversion|threadsafe)' }) }
+          }
+
+          $caption = if ($problems.Count -eq 0) { 'passed' } else { 'FAILED' }
+          $classicText = if ($classic.Success) { "$($classic.Groups[2].Value) cases, $($classic.Groups[3].Value) assertions, $($classic.Groups[4].Value) failed" } else { 'none' }
+          $facts = @(
+            "Runner: $env:INFO_RUNNER",
+            "Compiler: $env:INFO_VS ($env:INFO_CXX)",
+            "CMake: $env:INFO_CMAKE",
+            "SQLite: $env:INFO_SQLITE",
+            "Configuration: $cfg, x64, Visual Studio 17 2022, static Chapeau",
+            "Warnings: $env:INFO_WARNINGS",
+            "Tests registered: $registered; executed and passed: $($passedTests.Count); failed or not run: $($notPassed.Count)",
+            "SQLite-threading tests passed: $sqliteTests of 6; destructor-abort tests passed: $destructorTests of 4; harness self-check passed: $selfcheck (sub-checks: $selfcheckSteps)",
+            "Classic suite: $classicText"
+          ) + @($evidence | ForEach-Object { "Pinned build: $_" })
+          $facts | ForEach-Object { Write-Host $_ }
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value (@("### Windows $cfg - $caption", '') + ($facts | ForEach-Object { "- $_" }))
+          $encode = { param($s) $s.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+          if ($problems.Count -eq 0) {
+            Write-Host "::notice title=windows $cfg passed::$(& $encode ($facts -join "`n"))"
+            exit 0
+          }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value (@('', 'Problems:') + ($problems | ForEach-Object { "- $_" }))
+          $failed = @(Select-String -Path $log -Pattern '^The following tests FAILED:' -Context 0, 20 | ForEach-Object { $_.Context.PostContext })
+          $detail = (@($problems) + @('') + $failed + @('', 'end of the ctest log:') + @(Get-Content $log -Tail 40)) -join "`n"
+          Write-Host "::error title=windows $cfg FAILED::$(& $encode $detail)"
+          exit 1
+      - name: Keep the logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.config }}-logs
+          path: |
+            configure-${{ matrix.config }}.log
+            build-${{ matrix.config }}.log
+            ctest-${{ matrix.config }}.log
+            build-${{ matrix.config }}/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 14
